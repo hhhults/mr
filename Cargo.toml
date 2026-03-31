@@ -1,0 +1,20 @@
+[package]
+name = "mr"
+version = "0.1.0"
+edition = "2021"
+description = "Live-coding CLI for Ableton Live"
+
+[[bin]]
+name = "mr"
+path = "src/main.rs"
+
+[dependencies]
+metaritual = { git = "https://github.com/hhhults/metaritual.git" }
+ableton = { git = "https://github.com/hhhults/ableton-rs.git" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.9"
+thiserror = "2"
+libc = "0.2"
+dirs = "6"
