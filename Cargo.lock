@@ -206,7 +206,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 [[package]]
 name = "metaritual"
 version = "0.1.0"
-source = "git+https://github.com/hhhults/metaritual.git#6bbde4d19bccffc472e62998fe1cb73949f6e461"
+source = "git+https://github.com/hhhults/metaritual.git#99b975054f4ae414f105faeba6e71e5f82770993"
 dependencies = [
  "rand",
  "serde",

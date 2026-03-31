@@ -11,6 +11,7 @@ mod genre;
 mod harmony;
 mod inspect;
 mod json;
+mod loom;
 mod mix;
 mod resolve;
 mod scene;
@@ -443,6 +444,13 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SnapshotCmd,
     },
+
+    // ── Loom (global weave) ─────────────────────────────────
+    /// Manage global compositional weave — strands, crossings, arcs
+    Loom {
+        #[command(subcommand)]
+        cmd: LoomCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -616,6 +624,83 @@ enum DaemonCmd {
     Stop,
     /// Show daemon status
     Status,
+}
+
+#[derive(Subcommand)]
+enum LoomCmd {
+    /// Create a new weave plan
+    New {
+        /// Duration in bars
+        #[arg(long)]
+        duration: u32,
+        /// Duration in minutes (default 20)
+        #[arg(long)]
+        minutes: Option<f64>,
+    },
+    /// Add or update a strand (named voice with lifecycle)
+    Strand {
+        /// Strand name (maps to a track name)
+        name: String,
+        /// When the strand enters (0.0-1.0, proportion of weave)
+        #[arg(long)]
+        enter: f64,
+        /// Attack duration (proportion, default 0.1)
+        #[arg(long)]
+        attack: Option<f64>,
+        /// Sustain duration (proportion, default 0.7)
+        #[arg(long)]
+        sustain: Option<f64>,
+        /// Release duration (proportion, default 0.1)
+        #[arg(long)]
+        release: Option<f64>,
+    },
+    /// Set a parameter trajectory on a strand
+    Trajectory {
+        /// Strand name
+        strand: String,
+        /// Parameter name
+        param: String,
+        /// Trajectory spec: constant:0.5, ramp:0.2,0.8, drunk:lo,hi,step, sine:lo,hi,cycles, follow:strand,param,lag
+        spec: String,
+    },
+    /// Add a crossing (interaction between strands)
+    Crossing {
+        /// Crossing kind: handoff, crossfade, entrain, diverge, converge, echo
+        kind: String,
+        /// Strand names involved
+        #[arg(num_args = 1..)]
+        strands: Vec<String>,
+        /// When the crossing occurs (0.0-1.0)
+        #[arg(long)]
+        at: f64,
+        /// Duration of crossing (proportion, default 0.05)
+        #[arg(long)]
+        duration: Option<f64>,
+    },
+    /// Add an arc movement (coarse structure)
+    Arc {
+        /// Movement name
+        name: String,
+        /// Start position (0.0-1.0)
+        #[arg(long)]
+        from: f64,
+        /// End position (0.0-1.0)
+        #[arg(long)]
+        to: f64,
+        /// Energy trajectory spec (default: ramp proportional to position)
+        #[arg(long)]
+        energy: Option<String>,
+    },
+    /// Start the weave (begin tracking time)
+    Start,
+    /// Show current weave status (JSON)
+    Status,
+    /// Show the full weave plan
+    Show,
+    /// End the active weave (archives it)
+    End,
+    /// Export the raw weave JSON
+    Export,
 }
 
 fn main() {
@@ -797,6 +882,28 @@ fn main() {
             SnapshotCmd::Restore { name } => snapshot::restore(&name),
             SnapshotCmd::List => snapshot::list(),
             SnapshotCmd::Delete { name } => snapshot::delete(&name),
+        },
+
+        // ── Loom ──
+        Cmd::Loom { cmd } => match cmd {
+            LoomCmd::New { duration, minutes } => loom::new(duration, minutes),
+            LoomCmd::Strand { name, enter, attack, sustain, release } => {
+                loom::strand(&name, enter, attack, sustain, release)
+            }
+            LoomCmd::Trajectory { strand, param, spec } => {
+                loom::trajectory(&strand, &param, &spec)
+            }
+            LoomCmd::Crossing { kind, strands, at, duration } => {
+                loom::crossing(&kind, &strands, at, duration)
+            }
+            LoomCmd::Arc { name, from, to, energy } => {
+                loom::arc(&name, from, to, energy.as_deref())
+            }
+            LoomCmd::Start => loom::start(),
+            LoomCmd::Status => loom::status(),
+            LoomCmd::Show => loom::show(),
+            LoomCmd::End => loom::end(),
+            LoomCmd::Export => loom::export(),
         },
     };
 
