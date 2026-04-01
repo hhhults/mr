@@ -1,10 +1,41 @@
 use crate::connect;
+use crate::daemon::{self, DaemonRequest};
 use crate::error::{Error, Result};
 
 /// Set device parameters using semantic key:value pairs.
 ///
 /// Looks up parameter names case-insensitively on the given device.
 pub fn set_params(track_name: &str, device_idx: i32, params: &[String]) -> Result<()> {
+    // Route through daemon if running
+    if daemon::is_running() {
+        let params_kv: Vec<[String; 2]> = params
+            .iter()
+            .map(|pair| {
+                let parts: Vec<&str> = pair.splitn(2, ':').collect();
+                if parts.len() != 2 {
+                    [pair.to_string(), String::new()]
+                } else {
+                    [parts[0].to_string(), parts[1].to_string()]
+                }
+            })
+            .collect();
+        let req = DaemonRequest {
+            cmd: "device_param".into(),
+            track: track_name.to_string(),
+            device: device_idx,
+            params_kv,
+            ..Default::default()
+        };
+        let resp = daemon::send_request(&req)?;
+        if resp.ok {
+            eprintln!("{}", resp.message.unwrap_or_default());
+        } else {
+            eprintln!("error: {}", resp.error.unwrap_or_default());
+        }
+        return Ok(());
+    }
+
+    // Direct fallback
     let session = connect::connect()?;
     let idx = connect::resolve_track(&session, track_name)?;
     let track = session.track(idx);

@@ -82,6 +82,33 @@ pub struct DaemonRequest {
     pub walk_seconds: f64,
     #[serde(default)]
     pub walk_seed: u64,
+    // Mix fields
+    #[serde(default)]
+    pub volume: Option<f64>,
+    #[serde(default)]
+    pub pan: Option<f64>,
+    #[serde(default)]
+    pub mute: Option<bool>,
+    #[serde(default)]
+    pub solo: Option<bool>,
+    // Device param fields
+    #[serde(default)]
+    pub params_kv: Vec<[String; 2]>, // key:value pairs for device params
+    // Send fields
+    #[serde(default)]
+    pub return_name: String,
+    #[serde(default)]
+    pub level: f64,
+    // Track create fields
+    #[serde(default)]
+    pub instrument: String,
+    #[serde(default)]
+    pub simpler: String,
+    #[serde(default)]
+    pub audio: bool,
+    // Scene fields
+    #[serde(default)]
+    pub scene_idx: Option<i32>,
     // Proxy fields
     #[serde(default)]
     pub address: String,
@@ -115,6 +142,17 @@ impl Default for DaemonRequest {
             walk_cycle: 4.0,
             walk_seconds: 8.0,
             walk_seed: 42,
+            volume: None,
+            pan: None,
+            mute: None,
+            solo: None,
+            params_kv: Vec::new(),
+            return_name: String::new(),
+            level: 0.0,
+            instrument: String::new(),
+            simpler: String::new(),
+            audio: false,
+            scene_idx: None,
             queries: Vec::new(),
             address: String::new(),
             osc_args: Vec::new(),
@@ -236,6 +274,12 @@ struct SharedState {
     /// Active walk cancel flags, keyed by walk_id.
     active_walks: Mutex<HashMap<String, Arc<AtomicBool>>>,
     walk_counter: Mutex<u64>,
+    /// Dedup: recent broadcast timestamps keyed by "track_idx:property".
+    recent_broadcasts: Mutex<HashMap<String, Instant>>,
+    /// Suppress listener callbacks until initial value dump has drained.
+    listeners_ready: AtomicBool,
+    /// Cached param names: (track_idx, device_idx, param_idx) → name.
+    param_name_cache: Mutex<HashMap<(i32, i32, i32), String>>,
 }
 
 fn refresh_track_cache(state: &SharedState) -> Result<()> {
@@ -341,6 +385,13 @@ fn handle_request(state: &Arc<SharedState>, req: &DaemonRequest) -> DaemonRespon
             }
             Err(e) => DaemonResponse::err(e.to_string()),
         },
+        "mix" => handle_mix(state, req),
+        "send_level" => handle_send_level(state, req),
+        "device_param" => handle_device_param(state, req),
+        "track_create" => handle_track_create(state, req),
+        "track_delete" => handle_track_delete(state, req),
+        "effect_load" => handle_effect_load(state, req),
+        "scene_fire" => handle_scene_fire(state, req),
         "walk" => handle_walk(state, req),
         "walk_stop" => handle_walk_stop(state, req),
         "walk_stop_all" => handle_walk_stop_all(state),
@@ -584,6 +635,291 @@ fn handle_automate(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
     )
 }
 
+// ─── Semantic handlers: mix, device, track, effect, scene ────────────────────
+
+fn handle_mix(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
+    let track_idx = match resolve_track(state, &req.track) {
+        Ok(i) => i,
+        Err(e) => return DaemonResponse::err(e.to_string()),
+    };
+    let track = state.session.track(track_idx);
+    let mut changes = Vec::new();
+
+    if let Some(v) = req.volume {
+        if let Err(e) = track.set_volume(v as f32) {
+            return DaemonResponse::err(format!("set_volume: {e}"));
+        }
+        changes.push(format!("vol:{v:.2}"));
+    }
+    if let Some(p) = req.pan {
+        if let Err(e) = track.set_panning(p as f32) {
+            return DaemonResponse::err(format!("set_panning: {e}"));
+        }
+        changes.push(format!("pan:{p:.2}"));
+    }
+    if let Some(m) = req.mute {
+        // Explicit set: mute=true → mute on, mute=false → mute off
+        if let Err(e) = track.set_mute(m) {
+            return DaemonResponse::err(format!("set_mute: {e}"));
+        }
+        changes.push(format!("mute:{m}"));
+    }
+    if let Some(s) = req.solo {
+        if let Err(e) = track.set_solo(s) {
+            return DaemonResponse::err(format!("set_solo: {e}"));
+        }
+        changes.push(format!("solo:{s}"));
+    }
+
+    // Read back actual values for event
+    let vol = req.volume.or_else(|| track.get_volume().ok().map(|v| v as f64));
+    let pan_val = req.pan.or_else(|| track.get_panning().ok().map(|v| v as f64));
+    let mute_val = if req.mute.is_some() {
+        track.get_mute().ok()
+    } else {
+        None
+    };
+    let solo_val = if req.solo.is_some() {
+        track.get_solo().ok()
+    } else {
+        None
+    };
+
+    // Update state
+    state.state.lock().unwrap().apply_mix(
+        track_idx,
+        req.volume,
+        req.pan,
+        mute_val,
+        solo_val,
+    );
+
+    // Broadcast + record for dedup against listener callbacks
+    if req.volume.is_some() { record_broadcast(state, &format!("{track_idx}:volume")); }
+    if req.pan.is_some() { record_broadcast(state, &format!("{track_idx}:panning")); }
+    if mute_val.is_some() { record_broadcast(state, &format!("{track_idx}:mute")); }
+    if solo_val.is_some() { record_broadcast(state, &format!("{track_idx}:solo")); }
+    state.broadcaster.broadcast(&StateEvent::MixChanged {
+        track: req.track.clone(),
+        track_idx,
+        volume: req.volume,
+        pan: req.pan,
+        mute: mute_val,
+        solo: solo_val,
+    });
+
+    DaemonResponse::ok(format!("mix {} → {}", req.track, changes.join(" ")))
+}
+
+fn handle_send_level(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
+    let track_idx = match resolve_track(state, &req.track) {
+        Ok(i) => i,
+        Err(e) => return DaemonResponse::err(e.to_string()),
+    };
+
+    // Resolve return track
+    let return_names = state.session.return_track_names().unwrap_or_default();
+    let return_idx = return_names
+        .iter()
+        .position(|n| n.eq_ignore_ascii_case(&req.return_name))
+        .or_else(|| {
+            return_names
+                .iter()
+                .position(|n| n.to_lowercase().contains(&req.return_name.to_lowercase()))
+        });
+    let return_idx = match return_idx {
+        Some(i) => i as i32,
+        None => return DaemonResponse::err(format!("return track \"{}\" not found", req.return_name)),
+    };
+
+    let track = state.session.track(track_idx);
+    if let Err(e) = track.set_send(return_idx, req.level as f32) {
+        return DaemonResponse::err(format!("set_send: {e}"));
+    }
+
+    state.broadcaster.broadcast(&StateEvent::SendChanged {
+        track: req.track.clone(),
+        track_idx,
+        return_idx,
+        level: req.level,
+    });
+
+    DaemonResponse::ok(format!(
+        "send {} → {} level:{:.2}",
+        req.track, req.return_name, req.level
+    ))
+}
+
+fn handle_device_param(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
+    let track_idx = match resolve_track(state, &req.track) {
+        Ok(i) => i,
+        Err(e) => return DaemonResponse::err(e.to_string()),
+    };
+    let track = state.session.track(track_idx);
+    let device = track.device(req.device);
+
+    let param_names = match device.parameter_names() {
+        Ok(n) => n,
+        Err(e) => return DaemonResponse::err(format!("parameter_names: {e}")),
+    };
+
+    let mut changes = Vec::new();
+
+    for kv in &req.params_kv {
+        let key = &kv[0];
+        let value: f32 = match kv[1].parse() {
+            Ok(v) => v,
+            Err(_) => return DaemonResponse::err(format!("bad value: {}", kv[1])),
+        };
+
+        let param_idx = param_names
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case(key))
+            .or_else(|| {
+                param_names
+                    .iter()
+                    .position(|n| n.to_lowercase().contains(&key.to_lowercase()))
+            });
+        let param_idx = match param_idx {
+            Some(i) => i,
+            None => return DaemonResponse::err(format!("parameter \"{}\" not found", key)),
+        };
+
+        if let Err(e) = device.set_param(param_idx as i32, value) {
+            return DaemonResponse::err(format!("set_param: {e}"));
+        }
+
+        record_broadcast(state, &format!("{track_idx}:d{}:p{param_idx}", req.device));
+        state.broadcaster.broadcast(&StateEvent::ParamChanged {
+            track: req.track.clone(),
+            track_idx,
+            device: req.device,
+            param: param_names[param_idx].clone(),
+            value: value as f64,
+        });
+
+        changes.push(format!("{}:{:.3}", param_names[param_idx], value));
+    }
+
+    DaemonResponse::ok(format!("device {} → {}", req.track, changes.join(" ")))
+}
+
+fn handle_track_create(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
+    let track = if req.audio {
+        match state.session.create_audio_track(-1) {
+            Ok(t) => t,
+            Err(e) => return DaemonResponse::err(format!("create_audio_track: {e}")),
+        }
+    } else {
+        match state.session.create_midi_track(-1) {
+            Ok(t) => t,
+            Err(e) => return DaemonResponse::err(format!("create_midi_track: {e}")),
+        }
+    };
+    thread::sleep(Duration::from_millis(150));
+
+    if let Err(e) = track.set_name(&req.name) {
+        return DaemonResponse::err(format!("set_name: {e}"));
+    }
+
+    let track_idx = track.track_idx;
+
+    if !req.instrument.is_empty() {
+        if let Err(e) = state.session.load_instrument(track_idx, &req.instrument) {
+            return DaemonResponse::err(format!("load_instrument: {e}"));
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+
+    if !req.simpler.is_empty() {
+        // Stage sample
+        let src = std::path::PathBuf::from(&req.simpler);
+        if src.exists() {
+            let dest_dir = dirs::home_dir()
+                .unwrap_or_default()
+                .join("Music/Ableton/User Library/Samples/Imported");
+            let _ = std::fs::create_dir_all(&dest_dir);
+            let filename = src.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let dest = dest_dir.join(&filename);
+            let _ = std::fs::copy(&src, &dest);
+            thread::sleep(Duration::from_millis(300));
+            let _ = track.load_sample(&filename);
+            thread::sleep(Duration::from_millis(300));
+        }
+    }
+
+    // Refresh track cache
+    let _ = refresh_track_cache(state);
+
+    // Register listeners for the new track
+    register_track_listeners(state, track_idx);
+
+    // Broadcast
+    state.broadcaster.broadcast(&StateEvent::TrackCreated {
+        index: track_idx,
+        name: req.name.clone(),
+    });
+
+    let label = if !req.instrument.is_empty() {
+        format!("track \"{}\" [#{}] ← {}", req.name, track_idx, req.instrument)
+    } else if !req.simpler.is_empty() {
+        format!("track \"{}\" [#{}] ← simpler", req.name, track_idx)
+    } else {
+        format!("track \"{}\" [#{}]", req.name, track_idx)
+    };
+    DaemonResponse::ok(label)
+}
+
+fn handle_track_delete(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
+    let track_idx = match resolve_track(state, &req.track) {
+        Ok(i) => i,
+        Err(e) => return DaemonResponse::err(e.to_string()),
+    };
+    if let Err(e) = state.session.delete_track(track_idx) {
+        return DaemonResponse::err(format!("delete_track: {e}"));
+    }
+    let _ = refresh_track_cache(state);
+    state.broadcaster.broadcast(&StateEvent::TrackDeleted { index: track_idx });
+    DaemonResponse::ok(format!("deleted track \"{}\"", req.track))
+}
+
+fn handle_effect_load(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
+    let track_idx = match resolve_track(state, &req.track) {
+        Ok(i) => i,
+        Err(e) => return DaemonResponse::err(e.to_string()),
+    };
+    if let Err(e) = state.session.load_effect(track_idx, &req.name) {
+        return DaemonResponse::err(format!("load_effect: {e}"));
+    }
+    thread::sleep(Duration::from_millis(300));
+    state.broadcaster.broadcast(&StateEvent::EffectLoaded {
+        track: req.track.clone(),
+        track_idx,
+        effect: req.name.clone(),
+    });
+    DaemonResponse::ok(format!("effect \"{}\" → {}", req.name, req.track))
+}
+
+fn handle_scene_fire(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
+    match req.scene_idx {
+        Some(idx) => {
+            if let Err(e) = state.session.fire_scene(idx) {
+                return DaemonResponse::err(format!("fire_scene: {e}"));
+            }
+            state.broadcaster.broadcast(&StateEvent::SceneFired { index: idx });
+            DaemonResponse::ok(format!("fired scene {}", idx))
+        }
+        None => {
+            if let Err(e) = state.session.play() {
+                return DaemonResponse::err(format!("play: {e}"));
+            }
+            state.state.lock().unwrap().playing = true;
+            state.broadcaster.broadcast(&StateEvent::TransportChanged { playing: true });
+            DaemonResponse::ok("▶ playing")
+        }
+    }
+}
+
 // ─── Connection handling ────────────────────────────────────────────────────
 
 fn handle_walk(state: &Arc<SharedState>, req: &DaemonRequest) -> DaemonResponse {
@@ -817,6 +1153,258 @@ fn write_response(mut stream: &UnixStream, resp: &DaemonResponse) -> Result<()> 
     Ok(())
 }
 
+// ─── AbletonOSC push listeners ──────────────────────────────────────────────
+
+/// Register AbletonOSC listeners for track properties and song-level state.
+/// AbletonOSC will push value changes back as OSC messages on the recv port.
+fn register_ableton_listeners(state: &SharedState, track_count: usize) {
+    let osc = state.session.osc();
+
+    // Song-level listeners
+    let _ = osc.send("/live/song/start_listen/tempo", &[]);
+    let _ = osc.send("/live/song/start_listen/is_playing", &[]);
+
+    // Per-track listeners: volume, panning, mute, solo
+    for i in 0..track_count {
+        let idx = Arg::Int(i as i32);
+        let _ = osc.send("/live/track/start_listen/volume", &[idx.clone()]);
+        let _ = osc.send("/live/track/start_listen/panning", &[idx.clone()]);
+        let _ = osc.send("/live/track/start_listen/mute", &[idx.clone()]);
+        let _ = osc.send("/live/track/start_listen/solo", &[idx.clone()]);
+    }
+
+    // Per-track device parameter listeners (device 0 = instrument)
+    // Also populate the param name cache.
+    {
+        let mut cache = state.param_name_cache.lock().unwrap();
+        for i in 0..track_count {
+            let track = state.session.track(i as i32);
+            let device = track.device(0);
+            if let Ok(names) = device.parameter_names() {
+                let param_count = names.len().min(64);
+                for p in 0..param_count {
+                    cache.insert((i as i32, 0, p as i32), names[p].clone());
+                    let _ = osc.send(
+                        "/live/device/start_listen/parameter/value",
+                        &[Arg::Int(i as i32), Arg::Int(0), Arg::Int(p as i32)],
+                    );
+                }
+            }
+        }
+    }
+
+    eprintln!("listeners: registered for {} tracks", track_count);
+
+    // Wait for initial value dump to drain, then enable listener dispatch
+    thread::sleep(Duration::from_millis(500));
+    state.listeners_ready.store(true, Ordering::Relaxed);
+    eprintln!("listeners: ready");
+}
+
+/// Register listeners for a single track (used when tracks are added at runtime).
+fn register_track_listeners(state: &SharedState, track_idx: i32) {
+    let osc = state.session.osc();
+    let idx = Arg::Int(track_idx);
+    let _ = osc.send("/live/track/start_listen/volume", &[idx.clone()]);
+    let _ = osc.send("/live/track/start_listen/panning", &[idx.clone()]);
+    let _ = osc.send("/live/track/start_listen/mute", &[idx.clone()]);
+    let _ = osc.send("/live/track/start_listen/solo", &[idx.clone()]);
+
+    // Device 0 params
+    let track = state.session.track(track_idx);
+    let device = track.device(0);
+    if let Ok(names) = device.parameter_names() {
+        let mut cache = state.param_name_cache.lock().unwrap();
+        for (p, name) in names.iter().enumerate().take(64) {
+            cache.insert((track_idx, 0, p as i32), name.clone());
+            let _ = osc.send(
+                "/live/device/start_listen/parameter/value",
+                &[Arg::Int(track_idx), Arg::Int(0), Arg::Int(p as i32)],
+            );
+        }
+    }
+}
+
+/// Spawn the listener thread that receives AbletonOSC push callbacks
+/// and translates them into StateEvents.
+fn start_listener_thread(state: &Arc<SharedState>, shutdown: &Arc<AtomicBool>) {
+    let rx = match state.session.osc().register_listener("/live/") {
+        Some(rx) => rx,
+        None => {
+            eprintln!("listeners: transport doesn't support listeners");
+            return;
+        }
+    };
+
+    let state = state.clone();
+    let shutdown = shutdown.clone();
+
+    thread::Builder::new()
+        .name("ableton-listener".into())
+        .spawn(move || {
+            // Track names by index (for events)
+            let get_track_name = |idx: i32| -> String {
+                let s = state.state.lock().unwrap();
+                s.tracks
+                    .get(idx as usize)
+                    .map(|t| t.name.clone())
+                    .unwrap_or_else(|| format!("track-{idx}"))
+            };
+
+            loop {
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+                // Use recv_timeout so we can check shutdown periodically
+                match rx.recv_timeout(Duration::from_millis(500)) {
+                    Ok((addr, args)) => {
+                        dispatch_listener_callback(&state, &get_track_name, &addr, &args);
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        })
+        .expect("failed to spawn listener thread");
+}
+
+/// Check if we recently broadcast the same event (dedup against semantic handlers).
+fn should_suppress(state: &SharedState, key: &str) -> bool {
+    let recent = state.recent_broadcasts.lock().unwrap();
+    if let Some(t) = recent.get(key) {
+        t.elapsed() < Duration::from_millis(100)
+    } else {
+        false
+    }
+}
+
+/// Record a broadcast for dedup purposes.
+fn record_broadcast(state: &SharedState, key: &str) {
+    state
+        .recent_broadcasts
+        .lock()
+        .unwrap()
+        .insert(key.to_string(), Instant::now());
+}
+
+/// Translate an AbletonOSC push callback into a StateEvent and broadcast it.
+fn dispatch_listener_callback(
+    state: &SharedState,
+    get_track_name: &dyn Fn(i32) -> String,
+    addr: &str,
+    args: &[Arg],
+) {
+    // Gate: suppress until initial value dump has drained
+    if !state.listeners_ready.load(Ordering::Relaxed) {
+        return;
+    }
+    // Track property callbacks: /live/track/get/<prop> <track_idx> <value>
+    if let Some(prop) = addr.strip_prefix("/live/track/get/") {
+        let track_idx = match args.first().and_then(|a| a.as_i32()) {
+            Some(i) => i,
+            None => return,
+        };
+        let track = get_track_name(track_idx);
+
+        let dedup_key = format!("{track_idx}:{prop}");
+        if should_suppress(state, &dedup_key) {
+            return;
+        }
+
+        match prop {
+            "volume" => {
+                if let Some(v) = args.get(1).and_then(|a| a.as_f64()) {
+                    state.state.lock().unwrap().apply_mix(track_idx, Some(v), None, None, None);
+                    state.broadcaster.broadcast(&StateEvent::MixChanged {
+                        track, track_idx, volume: Some(v), pan: None, mute: None, solo: None,
+                    });
+                }
+            }
+            "panning" => {
+                if let Some(v) = args.get(1).and_then(|a| a.as_f64()) {
+                    state.state.lock().unwrap().apply_mix(track_idx, None, Some(v), None, None);
+                    state.broadcaster.broadcast(&StateEvent::MixChanged {
+                        track, track_idx, volume: None, pan: Some(v), mute: None, solo: None,
+                    });
+                }
+            }
+            "mute" => {
+                if let Some(v) = args.get(1).and_then(|a| a.as_bool()) {
+                    state.state.lock().unwrap().apply_mix(track_idx, None, None, Some(v), None);
+                    state.broadcaster.broadcast(&StateEvent::MixChanged {
+                        track, track_idx, volume: None, pan: None, mute: Some(v), solo: None,
+                    });
+                }
+            }
+            "solo" => {
+                if let Some(v) = args.get(1).and_then(|a| a.as_bool()) {
+                    state.state.lock().unwrap().apply_mix(track_idx, None, None, None, Some(v));
+                    state.broadcaster.broadcast(&StateEvent::MixChanged {
+                        track, track_idx, volume: None, pan: None, mute: None, solo: Some(v),
+                    });
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Device parameter callbacks: /live/device/get/parameter/value <track> <device> <param> <value>
+    if addr == "/live/device/get/parameter/value" {
+        if args.len() >= 4 {
+            let track_idx = args[0].as_i32().unwrap_or(0);
+            let device_idx = args[1].as_i32().unwrap_or(0);
+            let param_idx = args[2].as_i32().unwrap_or(0);
+            let value = args[3].as_f64().unwrap_or(0.0);
+
+            let dedup_key = format!("{track_idx}:d{device_idx}:p{param_idx}");
+            if should_suppress(state, &dedup_key) {
+                return;
+            }
+
+            let track = get_track_name(track_idx);
+
+            // Look up param name from cache, fall back to index
+            let param_name = state
+                .param_name_cache
+                .lock()
+                .unwrap()
+                .get(&(track_idx, device_idx, param_idx))
+                .cloned()
+                .unwrap_or_else(|| format!("param-{param_idx}"));
+
+            state.broadcaster.broadcast(&StateEvent::ParamChanged {
+                track,
+                track_idx,
+                device: device_idx,
+                param: param_name,
+                value,
+            });
+        }
+        return;
+    }
+
+    // Ignore the value_string callback (we only need numeric values)
+    if addr == "/live/device/get/parameter/value_string" {
+        return;
+    }
+
+    // Song-level callbacks
+    if addr == "/live/song/get/tempo" {
+        if let Some(tempo) = args.first().and_then(|a| a.as_f64()) {
+            state.state.lock().unwrap().apply_tempo(tempo);
+            state.broadcaster.broadcast(&StateEvent::TempoChanged { tempo });
+        }
+        return;
+    }
+    if addr == "/live/song/get/is_playing" {
+        if let Some(playing) = args.first().and_then(|a| a.as_bool()) {
+            state.state.lock().unwrap().playing = playing;
+            state.broadcaster.broadcast(&StateEvent::TransportChanged { playing });
+        }
+    }
+}
+
 // ─── Daemon server ──────────────────────────────────────────────────────────
 
 /// Start the daemon. Blocks the current process.
@@ -842,6 +1430,9 @@ pub fn run_daemon() -> Result<()> {
         broadcaster,
         active_walks: Mutex::new(HashMap::new()),
         walk_counter: Mutex::new(0),
+        recent_broadcasts: Mutex::new(HashMap::new()),
+        listeners_ready: AtomicBool::new(false),
+        param_name_cache: Mutex::new(HashMap::new()),
     });
 
     // Start listener immediately so the parent process sees us as running
@@ -856,7 +1447,11 @@ pub fn run_daemon() -> Result<()> {
     let listener = UnixListener::bind(&sock)?;
     eprintln!("mr daemon listening on {}", sock.display());
 
-    // Warm caches and sync state in the background
+    fs::write(pid_path(), process::id().to_string())?;
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    // Warm caches, sync state, then register Ableton listeners
     {
         let state = state.clone();
         thread::spawn(move || {
@@ -870,13 +1465,20 @@ pub fn run_daemon() -> Result<()> {
                 session_state.returns.len(),
                 session_state.tempo
             );
+            let track_count = session_state.tracks.len();
             *state.state.lock().unwrap() = session_state;
+
+            // Register AbletonOSC push listeners for all known tracks
+            register_ableton_listeners(&state, track_count);
         });
     }
 
-    fs::write(pid_path(), process::id().to_string())?;
-
-    let shutdown = Arc::new(AtomicBool::new(false));
+    // Spawn listener thread to receive AbletonOSC push callbacks
+    {
+        let state = state.clone();
+        let shutdown = shutdown.clone();
+        start_listener_thread(&state, &shutdown);
+    }
 
     // Periodic state poll — detect Ableton GUI changes every 3 seconds
     {

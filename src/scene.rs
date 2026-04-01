@@ -1,4 +1,5 @@
 use crate::connect;
+use crate::daemon::{self, DaemonRequest};
 use crate::error::Result;
 
 pub fn scene(idx: i32, name: Option<&str>) -> Result<()> {
@@ -23,6 +24,23 @@ pub fn scene(idx: i32, name: Option<&str>) -> Result<()> {
 }
 
 pub fn fire(idx: Option<i32>) -> Result<()> {
+    // Route through daemon if running
+    if daemon::is_running() {
+        let req = DaemonRequest {
+            cmd: "scene_fire".into(),
+            scene_idx: idx,
+            ..Default::default()
+        };
+        let resp = daemon::send_request(&req)?;
+        if resp.ok {
+            eprintln!("{}", resp.message.unwrap_or_default());
+        } else {
+            eprintln!("error: {}", resp.error.unwrap_or_default());
+        }
+        return Ok(());
+    }
+
+    // Direct fallback
     let session = connect::connect()?;
 
     if let Some(i) = idx {

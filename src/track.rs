@@ -4,11 +4,12 @@ use std::time::Duration;
 use std::{fs, path::Path};
 
 use crate::connect;
+use crate::daemon::{self, DaemonRequest};
 use crate::error::Result;
 
 /// Stage a sample into Ableton's User Library so the browser can find it.
 /// Returns the filename (not full path) to pass to load_sample.
-fn stage_sample(file_path: &str) -> Result<String> {
+pub(crate) fn stage_sample(file_path: &str) -> Result<String> {
     let src = PathBuf::from(shellexpand(file_path));
     if !src.exists() {
         return Err(crate::error::Error::Other(format!(
@@ -46,7 +47,7 @@ fn stage_sample(file_path: &str) -> Result<String> {
 }
 
 /// Expand ~ in paths
-fn shellexpand(path: &str) -> String {
+pub(crate) fn shellexpand(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
             return home.join(rest).to_string_lossy().to_string();
@@ -61,6 +62,38 @@ pub fn create(
     instrument: Option<&str>,
     audio: bool,
 ) -> Result<()> {
+    // Route through daemon if running
+    if daemon::is_running() {
+        let simpler_path = if let Some(s) = simpler {
+            // Stage sample first (needs local filesystem access)
+            let filename = stage_sample(s)?;
+            let dest = dirs::home_dir()
+                .unwrap_or_default()
+                .join("Music/Ableton/User Library/Samples/Imported")
+                .join(&filename);
+            dest.to_string_lossy().to_string()
+        } else {
+            String::new()
+        };
+
+        let req = DaemonRequest {
+            cmd: "track_create".into(),
+            name: name.to_string(),
+            instrument: instrument.unwrap_or("").to_string(),
+            simpler: simpler_path,
+            audio,
+            ..Default::default()
+        };
+        let resp = daemon::send_request(&req)?;
+        if resp.ok {
+            eprintln!("{}", resp.message.unwrap_or_default());
+        } else {
+            eprintln!("error: {}", resp.error.unwrap_or_default());
+        }
+        return Ok(());
+    }
+
+    // Direct fallback
     let session = connect::connect()?;
 
     let track = if audio {
@@ -102,6 +135,24 @@ pub fn create(
 }
 
 pub fn effect(track_name: &str, effect_name: &str) -> Result<()> {
+    // Route through daemon if running
+    if daemon::is_running() {
+        let req = DaemonRequest {
+            cmd: "effect_load".into(),
+            track: track_name.to_string(),
+            name: effect_name.to_string(),
+            ..Default::default()
+        };
+        let resp = daemon::send_request(&req)?;
+        if resp.ok {
+            eprintln!("{}", resp.message.unwrap_or_default());
+        } else {
+            eprintln!("error: {}", resp.error.unwrap_or_default());
+        }
+        return Ok(());
+    }
+
+    // Direct fallback
     let session = connect::connect()?;
     let idx = connect::resolve_track(&session, track_name)?;
     session.load_effect(idx, effect_name)?;
@@ -111,6 +162,23 @@ pub fn effect(track_name: &str, effect_name: &str) -> Result<()> {
 }
 
 pub fn delete(name: &str) -> Result<()> {
+    // Route through daemon if running
+    if daemon::is_running() {
+        let req = DaemonRequest {
+            cmd: "track_delete".into(),
+            track: name.to_string(),
+            ..Default::default()
+        };
+        let resp = daemon::send_request(&req)?;
+        if resp.ok {
+            eprintln!("{}", resp.message.unwrap_or_default());
+        } else {
+            eprintln!("error: {}", resp.error.unwrap_or_default());
+        }
+        return Ok(());
+    }
+
+    // Direct fallback
     let session = connect::connect()?;
     let idx = connect::resolve_track(&session, name)?;
     session.delete_track(idx)?;

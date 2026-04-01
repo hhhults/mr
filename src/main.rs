@@ -1,3 +1,4 @@
+mod audio;
 mod bridge;
 mod connect;
 mod curve;
@@ -25,6 +26,7 @@ mod stash;
 mod state;
 mod track;
 mod transform;
+mod viz;
 mod voice;
 mod walk;
 
@@ -435,6 +437,13 @@ enum Cmd {
         cmd: DaemonCmd,
     },
 
+    // ── Visual engine ─────────────────────────────────────────
+    /// Control the visual engine (mr-viz)
+    Viz {
+        #[command(subcommand)]
+        cmd: VizCmd,
+    },
+
     // ── Scenes ───────────────────────────────────────────────
     /// Create/configure a scene
     Scene {
@@ -459,6 +468,83 @@ enum Cmd {
     Loom {
         #[command(subcommand)]
         cmd: LoomCmd,
+    },
+
+    // ── Audio / FluCoMa ─────────────────────────────────────
+    /// Slice audio into grains using FluCoMa onset/novelty/amp/transient detection
+    Slice {
+        /// Path to audio file
+        audio_file: String,
+        /// Slicing method: onset, novelty, amp, transient
+        #[arg(long, default_value = "onset")]
+        method: String,
+        /// Detection threshold (method-dependent)
+        #[arg(long)]
+        threshold: Option<f64>,
+        /// Output directory (default: ./chops/<stem>/)
+        #[arg(long)]
+        out: Option<String>,
+        /// Minimum grain length in ms (skip shorter slices)
+        #[arg(long)]
+        min_length: Option<f64>,
+    },
+
+    /// Analyze audio files into a named corpus using FluCoMa feature extraction
+    Analyze {
+        /// Path to audio file or folder (or pipe from mr slice)
+        path: Option<String>,
+        /// Corpus name (saved to ~/.mr/corpus/<name>.json)
+        #[arg(long)]
+        name: String,
+        /// Comma-separated features: mfcc,spectral,pitch,loudness (default: all)
+        #[arg(long)]
+        features: Option<String>,
+    },
+
+    /// Decompose audio into components (HPSS, sines, transients, NMF)
+    Separate {
+        /// Path to audio file
+        audio_file: String,
+        /// Decomposition method: hpss, sines, transients, nmf
+        #[arg(long, default_value = "hpss")]
+        method: String,
+        /// Number of NMF components (only for --method nmf)
+        #[arg(long, default_value_t = 3)]
+        components: usize,
+        /// Output directory (default: ./separated/<stem>/)
+        #[arg(long)]
+        out: Option<String>,
+        /// Load components into Ableton as Simpler tracks with this prefix
+        #[arg(long)]
+        load: Option<String>,
+    },
+
+    /// Spectral morphing between two audio files via optimal transport
+    #[command(name = "morph-audio")]
+    MorphAudio {
+        /// First audio file (interpolation 0.0)
+        file_a: String,
+        /// Second audio file (interpolation 1.0)
+        file_b: String,
+        /// Interpolation amount (0.0 = A, 1.0 = B)
+        #[arg(long, default_value_t = 0.5)]
+        amount: f64,
+        /// Generate N intermediate steps instead of a single file
+        #[arg(long)]
+        steps: Option<usize>,
+        /// Output file or directory
+        #[arg(long)]
+        out: Option<String>,
+    },
+
+    /// Export a grain folder as SP-Tools compatible corpus JSON
+    #[command(name = "export")]
+    Export {
+        /// Directory containing grain WAV files
+        grain_dir: String,
+        /// Output JSON file path
+        #[arg(long)]
+        out: String,
     },
 }
 
@@ -623,6 +709,24 @@ enum SnapshotCmd {
     List,
     /// Delete a saved snapshot
     Delete { name: String },
+}
+
+#[derive(Subcommand)]
+enum VizCmd {
+    /// Set a visual parameter
+    Set {
+        /// Parameter name (e.g. feedback_decay, bg_energy)
+        name: String,
+        /// Value to set
+        value: f64,
+    },
+    /// Get a visual parameter value
+    Get {
+        /// Parameter name
+        name: String,
+    },
+    /// List all visual parameters
+    List,
 }
 
 #[derive(Subcommand)]
@@ -876,6 +980,13 @@ fn main() {
             sink::automate(&target, &param, device, resolution)
         }
 
+        // ── Visual engine ──
+        Cmd::Viz { cmd } => match cmd {
+            VizCmd::Set { name, value } => viz::set(&name, value),
+            VizCmd::Get { name } => viz::get(&name),
+            VizCmd::List => viz::list(),
+        },
+
         // ── Daemon ──
         Cmd::Daemon { cmd } => match cmd {
             DaemonCmd::Start => daemon::start(),
@@ -918,6 +1029,23 @@ fn main() {
             LoomCmd::End => loom::end(),
             LoomCmd::Export => loom::export(),
         },
+
+        // ── Audio / FluCoMa ──
+        Cmd::Slice { audio_file, method, threshold, out, min_length } => {
+            audio::slice(&audio_file, &method, threshold, out.as_deref(), min_length)
+        }
+        Cmd::Analyze { path, name, features } => {
+            audio::analyze(path.as_deref(), &name, features.as_deref())
+        }
+        Cmd::Separate { audio_file, method, components, out, load } => {
+            audio::separate(&audio_file, &method, components, out.as_deref(), load.as_deref())
+        }
+        Cmd::MorphAudio { file_a, file_b, amount, steps, out } => {
+            audio::morph_audio(&file_a, &file_b, amount, steps, out.as_deref())
+        }
+        Cmd::Export { grain_dir, out } => {
+            audio::export_sp_tools(&grain_dir, &out)
+        }
     };
 
     if let Err(e) = result {

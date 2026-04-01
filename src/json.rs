@@ -21,6 +21,16 @@ pub struct MrChord {
     pub root_midi: i32,
 }
 
+/// A grain reference in a slice manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MrGrain {
+    pub path: String,
+    pub index: usize,
+    pub start: f64,
+    pub duration: f64,
+    pub source: String,
+}
+
 /// The four data types that flow through pipes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -36,6 +46,13 @@ pub enum MrData {
 
     #[serde(rename = "pitches")]
     Pitches { values: Vec<i32> },
+
+    #[serde(rename = "grains")]
+    Grains {
+        source: String,
+        sample_rate: u32,
+        grains: Vec<MrGrain>,
+    },
 }
 
 impl MrData {
@@ -45,6 +62,7 @@ impl MrData {
             MrData::Progression { .. } => "progression",
             MrData::Curve { .. } => "curve",
             MrData::Pitches { .. } => "pitches",
+            MrData::Grains { .. } => "grains",
         }
     }
 
@@ -95,6 +113,22 @@ impl MrData {
             }),
         }
     }
+
+    /// Unwrap as grains, or return a type mismatch error.
+    pub fn into_grains(self, command: &str) -> Result<(String, u32, Vec<MrGrain>)> {
+        match self {
+            MrData::Grains {
+                source,
+                sample_rate,
+                grains,
+            } => Ok((source, sample_rate, grains)),
+            other => Err(Error::TypeMismatch {
+                command: command.to_string(),
+                expected: "grains".to_string(),
+                got: other.type_name().to_string(),
+            }),
+        }
+    }
 }
 
 /// Read MrData from stdin. Returns None if stdin is a TTY (no pipe).
@@ -119,7 +153,7 @@ pub fn write_stdout(data: &MrData) -> Result<()> {
 }
 
 /// Check if stdin is a TTY (not piped).
-fn atty_stdin() -> bool {
+pub(crate) fn atty_stdin() -> bool {
     use std::os::unix::io::AsRawFd;
     unsafe { libc::isatty(io::stdin().as_raw_fd()) != 0 }
 }
