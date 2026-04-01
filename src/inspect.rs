@@ -3,12 +3,27 @@ use crate::error::Result;
 use crate::json::{MrData, MrNote, write_stdout};
 
 pub fn status() -> Result<()> {
+    use ableton::Arg;
+
     let session = connect::connect()?;
-    let tempo = session.get_tempo()?;
-    let playing = session.is_playing()?;
-    let (num, den) = session.get_time_signature()?;
-    let num_tracks = session.num_tracks()?;
-    let cpu = session.cpu_load()?;
+
+    // Batch all status queries into one OSC cycle
+    let queries = vec![
+        ("/live/song/get/tempo".to_string(), vec![]),
+        ("/live/song/get/is_playing".to_string(), vec![]),
+        ("/live/song/get/signature_numerator".to_string(), vec![]),
+        ("/live/song/get/signature_denominator".to_string(), vec![]),
+        ("/live/song/get/num_tracks".to_string(), vec![]),
+        ("/live/application/get/average_process_usage".to_string(), vec![]),
+    ];
+    let results = session.osc().batch_query(&queries)?;
+
+    let tempo = results[0].first().and_then(|a| a.as_f32()).unwrap_or(120.0);
+    let playing = results[1].first().and_then(|a| a.as_bool()).unwrap_or(false);
+    let num = results[2].first().and_then(|a: &Arg| a.as_i32()).unwrap_or(4);
+    let den = results[3].first().and_then(|a: &Arg| a.as_i32()).unwrap_or(4);
+    let num_tracks = results[4].first().and_then(|a: &Arg| a.as_i32()).unwrap_or(0);
+    let cpu = results[5].first().and_then(|a| a.as_f32()).unwrap_or(0.0);
 
     println!("tempo:     {:.1} BPM", tempo);
     println!("playing:   {}", if playing { "yes" } else { "no" });

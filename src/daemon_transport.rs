@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use ableton::{Arg, Transport};
 
-use crate::daemon::{socket_path, DaemonRequest, DaemonResponse};
+use crate::daemon::{socket_path, BatchQueryEntry, DaemonRequest, DaemonResponse};
 
 struct DaemonConn {
     reader: BufReader<UnixStream>,
@@ -88,7 +88,6 @@ impl Transport for DaemonTransport {
         if resp.ok {
             Ok(resp.result.unwrap_or_default())
         } else {
-            // Map daemon errors back to appropriate ableton errors
             let msg = resp.error.unwrap_or_default();
             if msg.contains("timed out") {
                 Err(ableton::Error::Timeout {
@@ -97,6 +96,33 @@ impl Transport for DaemonTransport {
             } else {
                 Err(ableton::Error::Ableton(msg))
             }
+        }
+    }
+
+    fn batch_query_timeout(
+        &self,
+        queries: &[(String, Vec<Arg>)],
+        timeout: Duration,
+    ) -> ableton::Result<Vec<Vec<Arg>>> {
+        let req = DaemonRequest {
+            cmd: "batch_query".into(),
+            queries: queries
+                .iter()
+                .map(|(addr, args)| BatchQueryEntry {
+                    address: addr.clone(),
+                    args: args.clone(),
+                })
+                .collect(),
+            timeout_ms: Some(timeout.as_millis() as u64),
+            ..Default::default()
+        };
+        let resp = self.request(&req)?;
+        if resp.ok {
+            Ok(resp.results.unwrap_or_default())
+        } else {
+            Err(ableton::Error::Ableton(
+                resp.error.unwrap_or_else(|| "batch query failed".into()),
+            ))
         }
     }
 }

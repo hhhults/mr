@@ -127,12 +127,11 @@ pub fn list() -> Result<()> {
         return Ok(());
     }
 
+    // Batch-query all track info in one OSC cycle
+    let info = session.batch_track_info(names.len() as i32)?;
+
     for (i, name) in names.iter().enumerate() {
-        let track = session.track(i as i32);
-        let vol = track.get_volume()?;
-        let pan = track.get_panning()?;
-        let muted = track.get_mute()?;
-        let armed = track.get_arm()?;
+        let (vol, pan, muted, _solo, armed) = info.get(i).copied().unwrap_or_default();
 
         let mut flags = Vec::new();
         if muted {

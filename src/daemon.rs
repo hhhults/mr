@@ -89,6 +89,9 @@ pub struct DaemonRequest {
     pub osc_args: Vec<Arg>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    // Batch query fields
+    #[serde(default)]
+    pub queries: Vec<BatchQueryEntry>,
 }
 
 impl Default for DaemonRequest {
@@ -112,11 +115,19 @@ impl Default for DaemonRequest {
             walk_cycle: 4.0,
             walk_seconds: 8.0,
             walk_seed: 42,
+            queries: Vec::new(),
             address: String::new(),
             osc_args: Vec::new(),
             timeout_ms: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchQueryEntry {
+    pub address: String,
+    #[serde(default)]
+    pub args: Vec<Arg>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -130,6 +141,8 @@ pub struct DaemonResponse {
     pub update_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Vec<Arg>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub results: Option<Vec<Vec<Arg>>>,
 }
 
 impl DaemonResponse {
@@ -140,6 +153,7 @@ impl DaemonResponse {
             error: None,
             update_kind: None,
             result: None,
+            results: None,
         }
     }
 
@@ -150,6 +164,7 @@ impl DaemonResponse {
             error: None,
             update_kind: Some(kind.into()),
             result: None,
+            results: None,
         }
     }
 
@@ -160,6 +175,18 @@ impl DaemonResponse {
             error: None,
             update_kind: None,
             result: Some(result),
+            results: None,
+        }
+    }
+
+    fn ok_with_results(results: Vec<Vec<Arg>>) -> Self {
+        DaemonResponse {
+            ok: true,
+            message: None,
+            error: None,
+            update_kind: None,
+            result: None,
+            results: Some(results),
         }
     }
 
@@ -170,6 +197,7 @@ impl DaemonResponse {
             error: Some(error.into()),
             update_kind: None,
             result: None,
+            results: None,
         }
     }
 }
@@ -293,6 +321,7 @@ fn poll_ableton_state(state: &SharedState) {
 fn handle_request(state: &Arc<SharedState>, req: &DaemonRequest) -> DaemonResponse {
     match req.cmd.as_str() {
         "query" => handle_proxy_query(state, req),
+        "batch_query" => handle_batch_query(state, req),
         "send" => handle_proxy_send(state, req),
         "write" => handle_write(state, req),
         "automate" => handle_automate(state, req),
@@ -331,6 +360,22 @@ fn handle_proxy_query(state: &SharedState, req: &DaemonRequest) -> DaemonRespons
         .query_timeout(&req.address, &req.osc_args, timeout)
     {
         Ok(result) => DaemonResponse::ok_with_result(result),
+        Err(e) => DaemonResponse::err(e.to_string()),
+    }
+}
+
+fn handle_batch_query(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
+    let timeout = req
+        .timeout_ms
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(2));
+    let queries: Vec<(String, Vec<Arg>)> = req
+        .queries
+        .iter()
+        .map(|q| (q.address.clone(), q.args.clone()))
+        .collect();
+    match state.session.osc().batch_query_timeout(&queries, timeout) {
+        Ok(results) => DaemonResponse::ok_with_results(results),
         Err(e) => DaemonResponse::err(e.to_string()),
     }
 }
@@ -708,6 +753,7 @@ fn handle_walk(state: &Arc<SharedState>, req: &DaemonRequest) -> DaemonResponse 
         error: None,
         update_kind: None,
         result: None,
+        results: None,
     }
 }
 
