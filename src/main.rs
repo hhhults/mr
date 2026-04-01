@@ -3,8 +3,10 @@ mod connect;
 mod curve;
 mod curve_transform;
 mod daemon;
+mod daemon_transport;
 mod device;
 mod error;
+mod events;
 mod generate;
 mod generative;
 mod genre;
@@ -20,6 +22,7 @@ mod sink;
 mod snapshot;
 mod spectrum;
 mod stash;
+mod state;
 mod track;
 mod transform;
 mod voice;
@@ -397,6 +400,12 @@ enum Cmd {
         seed: u64,
     },
 
+    /// Stop active walks (daemon only)
+    WalkStop {
+        /// Walk ID to stop (omit to stop all)
+        id: Option<String>,
+    },
+
     // ── Sinks (stdin → Ableton) ─────────────────────────────
     /// Write pattern to a clip
     Write {
@@ -624,6 +633,8 @@ enum DaemonCmd {
     Stop,
     /// Show daemon status
     Status,
+    /// Stream events to terminal (for debugging)
+    Events,
 }
 
 #[derive(Subcommand)]
@@ -857,6 +868,7 @@ fn main() {
         Cmd::Walk { track: t, param, from, to, seconds, device, drunk, sine, range, step, cycle, seed } => {
             walk::walk(&t, &param, from, to, seconds, device, drunk, sine, range, step, cycle, seed)
         }
+        Cmd::WalkStop { id } => walk::walk_stop(id.as_deref()),
 
         // ── Sinks ──
         Cmd::Write { target, length, name } => sink::write(&target, length, name.as_deref()),
@@ -869,6 +881,7 @@ fn main() {
             DaemonCmd::Start => daemon::start(),
             DaemonCmd::Stop => daemon::stop(),
             DaemonCmd::Status => daemon::status(),
+            DaemonCmd::Events => daemon::stream_events(),
         },
 
         // ── Scenes ──

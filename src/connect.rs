@@ -1,15 +1,24 @@
 use ableton::Session;
 
+use crate::daemon;
+use crate::daemon_transport::DaemonTransport;
 use crate::error::{Error, Result};
 
-/// Connect to Ableton Live via OSC.
+/// Connect to Ableton Live.
+/// If the daemon is running, routes through it (shared connection, cached state).
+/// Otherwise falls back to direct UDP.
 pub fn connect() -> Result<Session> {
-    Session::connect().map_err(|e| Error::Connection(e.to_string()))
+    if daemon::is_running() {
+        let transport = DaemonTransport::connect()
+            .map_err(|e| Error::Connection(format!("daemon: {}", e)))?;
+        Ok(Session::with_transport(transport))
+    } else {
+        Session::connect().map_err(|e| Error::Connection(e.to_string()))
+    }
 }
 
 /// Resolve a track name to its index by querying Ableton.
 pub fn resolve_track(session: &Session, name: &str) -> Result<i32> {
-    // Support #N syntax for raw index access
     if let Some(idx_str) = name.strip_prefix('#') {
         return idx_str
             .parse::<i32>()
@@ -31,15 +40,13 @@ pub fn resolve_track(session: &Session, name: &str) -> Result<i32> {
 }
 
 /// Resolve a return track identifier (A, B, C or index) to its index.
-pub fn resolve_return(session: &Session, name: &str) -> Result<i32> {
-    // Support letter names: A=0, B=1, C=2, etc.
+pub fn resolve_return(_session: &Session, name: &str) -> Result<i32> {
     if name.len() == 1 {
         let ch = name.chars().next().unwrap().to_ascii_uppercase();
         if ch.is_ascii_uppercase() {
             return Ok((ch as i32) - ('A' as i32));
         }
     }
-    // Support #N or numeric
     if let Some(idx_str) = name.strip_prefix('#') {
         return idx_str
             .parse::<i32>()

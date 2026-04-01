@@ -5,9 +5,10 @@ version = 4
 [[package]]
 name = "ableton"
 version = "0.1.0"
-source = "git+https://github.com/hhhults/ableton-rs.git#ad6ee6a52b084d65966f74180a70b52e7b470d97"
+source = "git+https://github.com/hhhults/ableton-rs.git#4b06c0c7787c4df2a930ffec673bd232073b63d2"
 dependencies = [
  "rosc",
+ "serde",
  "serde_json",
  "thiserror",
 ]
