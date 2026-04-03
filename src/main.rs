@@ -64,6 +64,11 @@ enum Cmd {
         #[arg(long)]
         audio: bool,
     },
+    /// Rename a track
+    Rename {
+        track: String,
+        new_name: String,
+    },
     /// Delete a track by name
     DeleteTrack { name: String },
     /// Load an audio effect onto a track
@@ -101,6 +106,45 @@ enum Cmd {
         params: Vec<String>,
     },
 
+    /// Set parameters on a drum pad's device
+    PadDevice {
+        track: String,
+        /// MIDI note of the pad (e.g. 36 for kick)
+        #[arg(long)]
+        pad: i32,
+        /// Device index within the pad (default 0)
+        #[arg(long, default_value_t = 0)]
+        device: i32,
+        /// key:value parameter pairs
+        params: Vec<String>,
+    },
+    /// Set parameters on a chain's device
+    ChainDevice {
+        track: String,
+        /// Chain index within the rack
+        #[arg(long)]
+        chain: i32,
+        /// Device index within the chain (default 0)
+        #[arg(long, default_value_t = 0)]
+        device: i32,
+        /// Index of the rack device on the track (default 0)
+        #[arg(long, default_value_t = 0)]
+        rack_device: i32,
+        /// key:value parameter pairs
+        params: Vec<String>,
+    },
+    /// Set parameters on a return track's device
+    ReturnDevice {
+        /// Return track (A, B, C, etc.)
+        #[arg(name = "return")]
+        return_track: String,
+        /// Device index (default 0)
+        #[arg(long, default_value_t = 0)]
+        device: i32,
+        /// key:value parameter pairs
+        params: Vec<String>,
+    },
+
     // ── Inspection ───────────────────────────────────────────
     /// Show session status
     Status,
@@ -109,6 +153,26 @@ enum Cmd {
     /// Show device parameters
     Params {
         track: String,
+        device_idx: Option<i32>,
+    },
+    /// List occupied drum pads on a Drum Rack
+    Pads {
+        track: String,
+        /// Device index of the Drum Rack (default 0)
+        device_idx: Option<i32>,
+    },
+    /// List chains on a rack device
+    Chains {
+        track: String,
+        /// Device index of the rack (default 0)
+        device_idx: Option<i32>,
+    },
+    /// Show parameters for a return track device
+    ReturnParams {
+        /// Return track (A, B, C, etc.)
+        #[arg(name = "return")]
+        return_track: String,
+        /// Device index (default 0)
         device_idx: Option<i32>,
     },
     /// List return tracks
@@ -417,6 +481,23 @@ enum Cmd {
         length: Option<f64>,
         #[arg(long)]
         name: Option<String>,
+    },
+    /// Set clip loop points
+    ClipLoop {
+        /// "track:slot" (e.g. "drums:0")
+        target: String,
+        /// Loop start position in beats
+        #[arg(long)]
+        start: Option<f64>,
+        /// Loop end position in beats
+        #[arg(long)]
+        end: Option<f64>,
+        /// Enable looping
+        #[arg(long, conflicts_with = "off")]
+        on: bool,
+        /// Disable looping
+        #[arg(long, conflicts_with = "on")]
+        off: bool,
     },
     /// Write curve as clip automation
     Automate {
@@ -727,6 +808,70 @@ enum VizCmd {
     },
     /// List all visual parameters
     List,
+    /// Manage image corpora
+    Corpus {
+        #[command(subcommand)]
+        cmd: CorpusCmd,
+    },
+    /// Manage grain voices
+    Voice {
+        #[command(subcommand)]
+        cmd: GrainVoiceCmd,
+    },
+    /// Start visual playback
+    Play,
+    /// Stop visual playback
+    Stop,
+    /// Set visual tempo
+    Tempo {
+        bpm: f64,
+    },
+    /// Toggle sync to Ableton transport
+    Sync {
+        /// on or off
+        enabled: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum CorpusCmd {
+    /// Load a corpus by name (from ~/musictools/visual-corpus/<name>/)
+    Load { name: String },
+    /// Unload a corpus
+    Unload { name: String },
+    /// List loaded corpora
+    List,
+}
+
+#[derive(Subcommand)]
+enum GrainVoiceCmd {
+    /// Add a grain voice
+    Add {
+        name: String,
+        #[arg(long)]
+        corpus: String,
+    },
+    /// Remove a grain voice
+    Remove { name: String },
+    /// Set a voice's grain pattern (list of brightness values)
+    Pattern {
+        name: String,
+        /// Comma-separated brightness values (0..1)
+        atoms: String,
+        /// Duration per grain in cycle-time
+        #[arg(long, default_value = "0.25")]
+        dur: f64,
+    },
+    /// Set a voice parameter's driving signal
+    Param {
+        name: String,
+        /// Parameter name (x, y, size, opacity, rotation, spread)
+        param: String,
+        /// Signal spec (e.g. const:0.5, sine:0,0.4,1, ramp:0,1,8)
+        signal: String,
+    },
+    /// List grain voices
+    List,
 }
 
 #[derive(Subcommand)]
@@ -833,6 +978,7 @@ fn main() {
         Cmd::Track { name, simpler, instrument, audio } => {
             track::create(&name, simpler.as_deref(), instrument.as_deref(), audio)
         }
+        Cmd::Rename { track: t, new_name } => track::rename(&t, &new_name),
         Cmd::DeleteTrack { name } => track::delete(&name),
         Cmd::Effect { track: t, name } => track::effect(&t, &name),
         Cmd::Tracks => track::list(),
@@ -843,6 +989,15 @@ fn main() {
 
         // ── Device ──
         Cmd::Device { track: t, device, params } => device::set_params(&t, device, &params),
+        Cmd::PadDevice { track: t, pad, device, params } => {
+            device::set_pad_params(&t, pad, device, &params)
+        }
+        Cmd::ChainDevice { track: t, chain, device, rack_device, params } => {
+            device::set_chain_params(&t, rack_device, chain, device, &params)
+        }
+        Cmd::ReturnDevice { return_track, device, params } => {
+            device::set_return_params(&return_track, device, &params)
+        }
 
         // ── Inspection ──
         Cmd::Status => inspect::status(),
@@ -854,6 +1009,11 @@ fn main() {
             }
         }
         Cmd::Params { track: t, device_idx } => inspect::params(&t, device_idx),
+        Cmd::Pads { track: t, device_idx } => inspect::pads(&t, device_idx),
+        Cmd::Chains { track: t, device_idx } => inspect::chains(&t, device_idx),
+        Cmd::ReturnParams { return_track, device_idx } => {
+            inspect::return_params(&return_track, device_idx)
+        }
         Cmd::Returns => inspect::returns(),
         Cmd::Read { target } => inspect::read(&target),
         Cmd::Meters => inspect::meters(),
@@ -976,6 +1136,9 @@ fn main() {
 
         // ── Sinks ──
         Cmd::Write { target, length, name } => sink::write(&target, length, name.as_deref()),
+        Cmd::ClipLoop { target, start, end, on, off } => {
+            sink::clip_loop(&target, start, end, on, off)
+        }
         Cmd::Automate { target, param, device, resolution } => {
             sink::automate(&target, &param, device, resolution)
         }
@@ -985,6 +1148,30 @@ fn main() {
             VizCmd::Set { name, value } => viz::set(&name, value),
             VizCmd::Get { name } => viz::get(&name),
             VizCmd::List => viz::list(),
+            VizCmd::Corpus { cmd } => match cmd {
+                CorpusCmd::Load { name } => viz::corpus_load(&name),
+                CorpusCmd::Unload { name } => viz::corpus_unload(&name),
+                CorpusCmd::List => viz::corpus_list(),
+            },
+            VizCmd::Voice { cmd } => match cmd {
+                GrainVoiceCmd::Add { name, corpus } => viz::voice_add(&name, &corpus),
+                GrainVoiceCmd::Remove { name } => viz::voice_remove(&name),
+                GrainVoiceCmd::Pattern { name, atoms, dur } => {
+                    let values: Vec<f64> = atoms
+                        .split(',')
+                        .filter_map(|s| s.trim().parse().ok())
+                        .collect();
+                    viz::voice_pattern(&name, &values, dur)
+                }
+                GrainVoiceCmd::Param { name, param, signal } => {
+                    viz::voice_param(&name, &param, &signal)
+                }
+                GrainVoiceCmd::List => viz::voice_list(),
+            },
+            VizCmd::Play => viz::play(),
+            VizCmd::Stop => viz::stop(),
+            VizCmd::Tempo { bpm } => viz::set_tempo(bpm),
+            VizCmd::Sync { enabled } => viz::sync(&enabled),
         },
 
         // ── Daemon ──

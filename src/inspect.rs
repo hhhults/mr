@@ -117,6 +117,134 @@ pub fn params(track_name: &str, device_idx: Option<i32>) -> Result<()> {
     Ok(())
 }
 
+/// List occupied drum pads on a Drum Rack via raw OSC.
+pub fn pads(track_name: &str, device_idx: Option<i32>) -> Result<()> {
+    use ableton::Arg;
+
+    let session = connect::connect()?;
+    let idx = connect::resolve_track(&session, track_name)?;
+    let osc = session.osc();
+    let dev_idx = device_idx.unwrap_or(0);
+    let prefix = [Arg::Int(idx), Arg::Int(dev_idx)];
+
+    // Get occupied pad notes and names
+    let notes_resp = osc.query("/live/device/get/drum_pads/note", &prefix)?;
+    let names_resp = osc.query("/live/device/get/drum_pads/name", &prefix)?;
+
+    let pad_notes: Vec<i32> = notes_resp[2..].iter().filter_map(|a| a.as_i32()).collect();
+    let pad_names: Vec<String> = names_resp[2..].iter().filter_map(|a| a.as_str().map(String::from)).collect();
+
+    if pad_notes.is_empty() {
+        println!("no drum pads on {} device {}", track_name, dev_idx);
+        return Ok(());
+    }
+
+    println!("Drum Rack pads on {}:", track_name);
+    for (note, name) in pad_notes.iter().zip(pad_names.iter()) {
+        let note_name = connect::midi_note_name(*note);
+
+        // Get devices on this pad's chain
+        let pad_prefix = [Arg::Int(idx), Arg::Int(dev_idx), Arg::Int(*note)];
+        let dev_resp = osc.query("/live/drum_pad/chain/get/devices/name", &pad_prefix).unwrap_or_default();
+        let dev_names: Vec<String> = dev_resp[3..].iter().filter_map(|a| a.as_str().map(String::from)).collect();
+        let devices = if dev_names.is_empty() {
+            "(empty)".to_string()
+        } else {
+            dev_names.join(", ")
+        };
+
+        println!(
+            "  {:<4} ({:<3}) {:<12} — {}",
+            note_name, note, name, devices
+        );
+    }
+
+    Ok(())
+}
+
+/// List chains on a rack device via raw OSC.
+pub fn chains(track_name: &str, device_idx: Option<i32>) -> Result<()> {
+    use ableton::Arg;
+
+    let session = connect::connect()?;
+    let idx = connect::resolve_track(&session, track_name)?;
+    let osc = session.osc();
+    let dev_idx = device_idx.unwrap_or(0);
+    let prefix = [Arg::Int(idx), Arg::Int(dev_idx)];
+
+    // Get number of chains
+    let num_resp = osc.query("/live/device/get/num_chains", &prefix)?;
+    let num = num_resp.get(2).and_then(|a| a.as_i32()).unwrap_or(0);
+
+    if num == 0 {
+        println!("no chains on {} device {}", track_name, dev_idx);
+        return Ok(());
+    }
+
+    // Get chain names
+    let names_resp = osc.query("/live/device/get/chains/name", &prefix)?;
+    let chain_names: Vec<String> = names_resp[2..].iter().filter_map(|a| a.as_str().map(String::from)).collect();
+
+    println!("Chains on {} device {}:", track_name, dev_idx);
+    for i in 0..num {
+        let name = chain_names.get(i as usize).cloned().unwrap_or_default();
+
+        // Get chain volume
+        let chain_prefix = [Arg::Int(idx), Arg::Int(dev_idx), Arg::Int(i)];
+        let vol = osc.query("/live/chain/get/volume", &chain_prefix)
+            .ok()
+            .and_then(|r| r.get(3).and_then(|a| a.as_f32()))
+            .unwrap_or(0.0);
+
+        // Get chain device names
+        let dev_resp = osc.query("/live/chain/get/devices/name", &chain_prefix).unwrap_or_default();
+        let dev_names: Vec<String> = dev_resp[3..].iter().filter_map(|a| a.as_str().map(String::from)).collect();
+        let devices = if dev_names.is_empty() {
+            "(empty)".to_string()
+        } else {
+            dev_names.join(", ")
+        };
+
+        println!(
+            "  [{}] \"{}\"  vol:{:.2}  — {}",
+            i, name, vol, devices
+        );
+    }
+
+    Ok(())
+}
+
+/// Show parameters for a return track device via raw OSC.
+pub fn return_params(return_name: &str, device_idx: Option<i32>) -> Result<()> {
+    use ableton::Arg;
+
+    let session = connect::connect()?;
+    let idx = connect::resolve_return(&session, return_name)?;
+    let osc = session.osc();
+    let dev_idx = device_idx.unwrap_or(0);
+    let prefix = [Arg::Int(idx), Arg::Int(dev_idx)];
+
+    // Get device name from the return track's device list
+    let rt_prefix = [Arg::Int(idx)];
+    let dev_names_resp = osc.query("/live/return_track/get/devices/name", &rt_prefix)?;
+    let dev_names: Vec<String> = dev_names_resp.iter().filter_map(|a| a.as_str().map(String::from)).collect();
+    let dev_name = dev_names.get(dev_idx as usize).cloned().unwrap_or_else(|| "Unknown".to_string());
+
+    // Get parameter names and values
+    let names_resp = osc.query("/live/return_track/device/get/parameters/name", &prefix)?;
+    let values_resp = osc.query("/live/return_track/device/get/parameters/value", &prefix)?;
+
+    let param_names: Vec<String> = names_resp[2..].iter().filter_map(|a| a.as_str().map(String::from)).collect();
+    let param_values: Vec<f32> = values_resp[2..].iter().filter_map(|a| a.as_f32()).collect();
+
+    println!("Device: {} [{}]", dev_name, dev_idx);
+    for (i, (name, value)) in param_names.iter().zip(param_values.iter()).enumerate() {
+        println!("  [{:<3}] {:<30} = {:.4}", i, name, value);
+    }
+
+    Ok(())
+}
+
 pub fn returns() -> Result<()> {
     let session = connect::connect()?;
     let names = session.return_track_names()?;

@@ -56,6 +56,14 @@ pub fn resolve_return(_session: &Session, name: &str) -> Result<i32> {
         .map_err(|_| Error::ReturnTrackNotFound(name.to_string()))
 }
 
+/// Convert a MIDI note number to its name (e.g., 36 → "C1", 60 → "C3").
+pub fn midi_note_name(note: i32) -> String {
+    let names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    let octave = (note / 12) - 2; // MIDI note 0 = C-2, 60 = C3
+    let name_idx = (note % 12) as usize;
+    format!("{}{}", names[name_idx], octave)
+}
+
 /// Parse a "track:slot" target string.
 pub fn parse_target(target: &str) -> Result<(&str, i32)> {
     let parts: Vec<&str> = target.splitn(2, ':').collect();

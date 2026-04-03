@@ -56,6 +56,15 @@ pub(crate) fn shellexpand(path: &str) -> String {
     path.to_string()
 }
 
+pub fn rename(track_name: &str, new_name: &str) -> Result<()> {
+    let session = connect::connect()?;
+    let idx = connect::resolve_track(&session, track_name)?;
+    let track = session.track(idx);
+    track.set_name(new_name)?;
+    eprintln!("renamed \"{}\" → \"{}\"", track_name, new_name);
+    Ok(())
+}
+
 pub fn create(
     name: &str,
     simpler: Option<&str>,

@@ -84,6 +84,46 @@ pub fn write(target: &str, length: Option<f64>, name: Option<&str>) -> Result<()
     Ok(())
 }
 
+/// Set clip loop points and looping state.
+pub fn clip_loop(
+    target: &str,
+    start: Option<f64>,
+    end: Option<f64>,
+    on: bool,
+    off: bool,
+) -> Result<()> {
+    let (track_name, slot) = parse_target(target)?;
+    let session = connect::connect()?;
+    let idx = connect::resolve_track(&session, track_name)?;
+    let track = session.track(idx);
+    let clip = track.clip(slot);
+
+    let mut changes = Vec::new();
+
+    if let Some(s) = start {
+        clip.set_loop_start(s as f32)?;
+        changes.push(format!("start:{:.1}", s));
+    }
+    if let Some(e) = end {
+        clip.set_loop_end(e as f32)?;
+        changes.push(format!("end:{:.1}", e));
+    }
+    if on {
+        clip.set_looping(true)?;
+        changes.push("looping:on".to_string());
+    }
+    if off {
+        clip.set_looping(false)?;
+        changes.push("looping:off".to_string());
+    }
+
+    if !changes.is_empty() {
+        eprintln!("clip-loop {}:{} → {}", track_name, slot, changes.join(" "));
+    }
+
+    Ok(())
+}
+
 /// Write a curve as automation on a clip parameter.
 /// Routes through daemon if running, falls back to direct.
 pub fn automate(target: &str, param: &str, device_idx: i32, resolution: f64) -> Result<()> {
