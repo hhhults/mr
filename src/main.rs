@@ -5,6 +5,7 @@ mod curve;
 mod curve_transform;
 mod daemon;
 mod daemon_transport;
+mod datamosh;
 mod device;
 mod error;
 mod events;
@@ -104,6 +105,16 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         device: i32,
         params: Vec<String>,
+    },
+
+    /// Load a sample into a drum rack pad
+    PadSample {
+        track: String,
+        /// MIDI note of the pad (e.g. 36 for kick)
+        #[arg(long)]
+        pad: i32,
+        /// Path to the sample file
+        sample: String,
     },
 
     /// Set parameters on a drum pad's device
@@ -627,6 +638,75 @@ enum Cmd {
         #[arg(long)]
         out: String,
     },
+
+    /// List saved corpora
+    #[command(name = "corpora")]
+    Corpora,
+
+    /// Show info about a saved corpus
+    #[command(name = "corpus-info")]
+    CorpusInfo {
+        /// Corpus name
+        name: String,
+    },
+
+    /// Query a corpus for nearest grains
+    #[command(name = "corpus-query")]
+    CorpusQuery {
+        /// Corpus name
+        name: String,
+        /// Number of results
+        #[arg(long, default_value_t = 5)]
+        n: usize,
+        /// Sort by feature dimension (e.g. "loud", "bright", "high", "noisy")
+        #[arg(long)]
+        sort: Option<String>,
+        /// Find grains similar to this audio file
+        #[arg(long)]
+        like: Option<String>,
+    },
+
+    /// Delete a saved corpus
+    #[command(name = "corpus-delete")]
+    CorpusDelete {
+        /// Corpus name
+        name: String,
+    },
+
+    /// Load a corpus into Ableton as a playable Simpler instrument
+    #[command(name = "corpus-load")]
+    CorpusLoad {
+        /// Corpus name (from mr analyze)
+        name: String,
+        /// Track name to create/load onto
+        track: String,
+    },
+
+    /// Concatenative resynthesis: match source audio against a corpus
+    #[command(name = "concat-match")]
+    ConcatMatch {
+        /// Source audio file to resynthesize
+        source: String,
+        /// Corpus name to match against
+        corpus: String,
+        /// Target track:slot to write the result (e.g. "pad:0")
+        target: String,
+        /// Slicing method: onset, novelty, amp, transient
+        #[arg(long, default_value = "onset")]
+        method: String,
+        /// Onset detection threshold
+        #[arg(long)]
+        threshold: Option<f64>,
+        /// Consider top N candidates per segment (1 = best match only)
+        #[arg(long, default_value_t = 1)]
+        candidates: usize,
+        /// Random seed for candidate selection
+        #[arg(long)]
+        seed: Option<u64>,
+        /// Tempo in BPM (for converting seconds to beats)
+        #[arg(long)]
+        bpm: Option<f64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -831,6 +911,94 @@ enum VizCmd {
         /// on or off
         enabled: String,
     },
+    /// Animate optimal transport between two image mosaics
+    Transport {
+        /// Path to image A
+        path_a: String,
+        /// Path to image B
+        path_b: String,
+        /// Corpus to draw tiles from
+        #[arg(long)]
+        corpus: String,
+        /// Grid columns
+        #[arg(long, default_value = "30")]
+        cols: u32,
+        /// Grid rows
+        #[arg(long, default_value = "20")]
+        rows: u32,
+    },
+    /// Set transport animation speed
+    TransportSpeed {
+        speed: f64,
+    },
+    /// Approximate a target image using corpus grains (photo mosaic)
+    Mosaic {
+        /// Path to target image
+        path: String,
+        /// Corpus to draw tiles from
+        #[arg(long)]
+        corpus: String,
+        /// Grid columns
+        #[arg(long, default_value = "30")]
+        cols: u32,
+        /// Grid rows
+        #[arg(long, default_value = "20")]
+        rows: u32,
+    },
+    /// Control FFlive datamosh parameters (OSC to ffglitch-livecoding)
+    Datamosh {
+        /// Master glitch intensity (0.0–1.0). Accepts signal spec.
+        #[arg(long)]
+        intensity: Option<String>,
+        /// Motion vector scale (0.0–20.0). Accepts signal spec.
+        #[arg(long)]
+        mv_scale: Option<String>,
+        /// Rotate motion vectors by angle (-π to π). Accepts signal spec.
+        #[arg(long)]
+        mv_rotate: Option<String>,
+        /// Motion vector noise (0.0–1.0). Accepts signal spec.
+        #[arg(long)]
+        mv_noise: Option<String>,
+        /// I-frame pass-through rate (0=starve, 1=clean). Accepts signal spec.
+        #[arg(long)]
+        iframe_rate: Option<String>,
+        /// DCT coefficient noise (0.0–1.0). Accepts signal spec.
+        #[arg(long)]
+        dct_noise: Option<String>,
+        /// DCT requantization (1.0–64.0). Accepts signal spec.
+        #[arg(long)]
+        dct_quantize: Option<String>,
+        /// Block shift probability (0.0–1.0). Accepts signal spec.
+        #[arg(long)]
+        block_shift: Option<String>,
+        /// Glitch mode: smear, iframe-drop, block-shift, dct-crush
+        #[arg(long)]
+        mode: Option<String>,
+        /// Reset glitch state (clean frame)
+        #[arg(long)]
+        clean: bool,
+        /// Load a glitch script
+        #[arg(long)]
+        script: Option<String>,
+        /// Load/loop a video file
+        #[arg(long)]
+        video: Option<String>,
+    },
+    /// Enable frame pipe output to /tmp/mr-viz.pipe for FFlive
+    Pipe {
+        #[command(subcommand)]
+        cmd: PipeCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum PipeCmd {
+    /// Enable frame pipe (creates /tmp/mr-viz.pipe)
+    On,
+    /// Disable frame pipe
+    Off,
+    /// Show pipe status (frames written/dropped)
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -989,6 +1157,7 @@ fn main() {
 
         // ── Device ──
         Cmd::Device { track: t, device, params } => device::set_params(&t, device, &params),
+        Cmd::PadSample { track: t, pad, sample } => track::pad_sample(&t, pad, &sample),
         Cmd::PadDevice { track: t, pad, device, params } => {
             device::set_pad_params(&t, pad, device, &params)
         }
@@ -1172,6 +1341,38 @@ fn main() {
             VizCmd::Stop => viz::stop(),
             VizCmd::Tempo { bpm } => viz::set_tempo(bpm),
             VizCmd::Sync { enabled } => viz::sync(&enabled),
+            VizCmd::Transport { path_a, path_b, corpus, cols, rows } => {
+                viz::mosaic_transport(&path_a, &path_b, &corpus, cols, rows)
+            }
+            VizCmd::TransportSpeed { speed } => viz::transport_speed(speed),
+            VizCmd::Mosaic { path, corpus, cols, rows } => {
+                viz::mosaic(&path, &corpus, cols, rows)
+            }
+            VizCmd::Datamosh {
+                intensity, mv_scale, mv_rotate, mv_noise,
+                iframe_rate, dct_noise, dct_quantize, block_shift,
+                mode, clean, script, video,
+            } => {
+                datamosh::datamosh(
+                    intensity.as_deref(),
+                    mv_scale.as_deref(),
+                    mv_rotate.as_deref(),
+                    mv_noise.as_deref(),
+                    iframe_rate.as_deref(),
+                    dct_noise.as_deref(),
+                    dct_quantize.as_deref(),
+                    block_shift.as_deref(),
+                    mode.as_deref(),
+                    clean,
+                    script.as_deref(),
+                    video.as_deref(),
+                )
+            }
+            VizCmd::Pipe { cmd } => match cmd {
+                PipeCmd::On => viz::pipe_enable(),
+                PipeCmd::Off => viz::pipe_disable(),
+                PipeCmd::Status => viz::pipe_status(),
+            },
         },
 
         // ── Daemon ──
@@ -1232,6 +1433,16 @@ fn main() {
         }
         Cmd::Export { grain_dir, out } => {
             audio::export_sp_tools(&grain_dir, &out)
+        }
+        Cmd::Corpora => audio::corpora_list(),
+        Cmd::CorpusInfo { name } => audio::corpus_info(&name),
+        Cmd::CorpusQuery { name, n, sort, like } => {
+            audio::corpus_query(&name, n, sort.as_deref(), like.as_deref())
+        }
+        Cmd::CorpusDelete { name } => audio::corpus_delete(&name),
+        Cmd::CorpusLoad { name, track } => audio::corpus_load(&name, &track),
+        Cmd::ConcatMatch { source, corpus, target, method, threshold, candidates, seed, bpm } => {
+            audio::concat(&source, &corpus, &target, &method, threshold, candidates, seed, bpm)
         }
     };
 

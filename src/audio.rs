@@ -632,18 +632,22 @@ pub fn export_sp_tools(
     let desc_scaled = robustscale_apply(&descriptors, &desc_robust_fit);
     let mel_scaled = robustscale_apply(&melbands_data, &mel_robust_fit);
 
-    // Path relative to the output JSON file's location
-    let out_path_buf = PathBuf::from(track::shellexpand(output));
-    let out_parent = out_path_buf.parent().unwrap_or(Path::new("."));
-    let rel_path = if let Ok(canon_dir) = std::fs::canonicalize(&dir) {
-        if let Ok(canon_out) = std::fs::canonicalize(out_parent) {
-            pathdiff(&canon_dir, &canon_out)
-        } else {
-            dir.file_name().unwrap_or_default().to_string_lossy().to_string() + "/"
-        }
-    } else {
-        dir.file_name().unwrap_or_default().to_string_lossy().to_string() + "/"
-    };
+    // Path in Mac HFS format (colon-separated) as SP-Tools expects
+    let canon_dir = std::fs::canonicalize(&dir)
+        .unwrap_or_else(|_| dir.to_path_buf());
+    let rel_path = posix_to_hfs(&canon_dir);
+
+    // Build zero-filled stub datasets for mfccs (104 cols) and sines (64 cols)
+    let keys: Vec<&String> = descriptors.keys().collect();
+    let mfcc_stub: BTreeMap<String, Vec<f64>> = keys.iter()
+        .map(|k| ((*k).clone(), vec![0.0; 104]))
+        .collect();
+    let sines_stub: BTreeMap<String, Vec<f64>> = keys.iter()
+        .map(|k| ((*k).clone(), vec![0.0; 64]))
+        .collect();
+    let (mfcc_norm, mfcc_norm_fit) = normalize_dataset(&mfcc_stub);
+    let mfcc_robust_fit = robustscale_fit(&mfcc_stub);
+    let mfcc_scaled = robustscale_apply(&mfcc_stub, &mfcc_robust_fit);
 
     // Build the JSON
     let corpus_json = json!({
@@ -652,7 +656,7 @@ pub fn export_sp_tools(
             "info": {
                 "artist": "",
                 "title": rel_path.trim_end_matches('/'),
-                "description": format!("Exported by mr export --sp-tools ({} grains)", wavs.len()),
+                "description": format!("Exported by mr export ({} grains)", wavs.len()),
                 "date_created": "",
                 "date_analyzed": chrono_now(),
                 "url": "",
@@ -675,8 +679,8 @@ pub fn export_sp_tools(
             "setttings": {
                 "fftsettings": "default FluCoMa settings",
                 "numframes": "whole sample",
-                "descriptors": "mean of loudness, deriv of loudness, mean of centroid, deriv of centroid, mean of flatness, deriv of flatness, mean of pitch, pitch confidence, 40 melbands",
-                "comment": "exported by mr export --sp-tools"
+                "descriptors": "mean of loudness, deriv of loudness, mean of centroid, deriv of centroid, mean of flatness, deriv of flatness, mean of pitch, pitch confidence, 40 melbands, 104 mfccs, 64 sines",
+                "comment": "exported by mr export"
             }
         },
         "data": {
@@ -687,6 +691,12 @@ pub fn export_sp_tools(
                 "melbands_256": dataset_json(&melbands_data, 40),
                 "melbands_4410": dataset_json(&melbands_data, 40),
                 "melbands_all": dataset_json(&melbands_data, 40),
+                "mfccs_256": dataset_json(&mfcc_stub, 104),
+                "mfccs_4410": dataset_json(&mfcc_stub, 104),
+                "mfccs_all": dataset_json(&mfcc_stub, 104),
+                "sines_256": {},
+                "sines_4410": dataset_json(&sines_stub, 64),
+                "sines_all": dataset_json(&sines_stub, 64),
             },
             "normalized_datasets": {
                 "descriptors_256": dataset_json(&desc_norm, 8),
@@ -695,6 +705,9 @@ pub fn export_sp_tools(
                 "melbands_256": dataset_json(&mel_norm, 40),
                 "melbands_4410": dataset_json(&mel_norm, 40),
                 "melbands_all": dataset_json(&mel_norm, 40),
+                "mfccs_256": dataset_json(&mfcc_norm, 104),
+                "mfccs_4410": dataset_json(&mfcc_norm, 104),
+                "mfccs_all": dataset_json(&mfcc_norm, 104),
             },
             "scaled_datasets": {
                 "descriptors_256": dataset_json(&desc_scaled, 8),
@@ -703,6 +716,9 @@ pub fn export_sp_tools(
                 "melbands_256": dataset_json(&mel_scaled, 40),
                 "melbands_4410": dataset_json(&mel_scaled, 40),
                 "melbands_all": dataset_json(&mel_scaled, 40),
+                "mfccs_256": dataset_json(&mfcc_scaled, 104),
+                "mfccs_4410": dataset_json(&mfcc_scaled, 104),
+                "mfccs_all": dataset_json(&mfcc_scaled, 104),
             },
             "coll": coll_data
         },
@@ -714,6 +730,9 @@ pub fn export_sp_tools(
                 "melbands_256": mel_norm_fit.clone(),
                 "melbands_4410": mel_norm_fit.clone(),
                 "melbands_all": mel_norm_fit,
+                "mfccs_256": mfcc_norm_fit.clone(),
+                "mfccs_4410": mfcc_norm_fit.clone(),
+                "mfccs_all": mfcc_norm_fit,
             },
             "robustscaled": {
                 "descriptors_256": desc_robust_fit.clone(),
@@ -722,6 +741,9 @@ pub fn export_sp_tools(
                 "melbands_256": mel_robust_fit.clone(),
                 "melbands_4410": mel_robust_fit.clone(),
                 "melbands_all": mel_robust_fit,
+                "mfccs_256": mfcc_robust_fit.clone(),
+                "mfccs_4410": mfcc_robust_fit.clone(),
+                "mfccs_all": mfcc_robust_fit,
             }
         }
     });
@@ -922,31 +944,654 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     }
 }
 
+// ── mr corpora ──────────────────────────────────────────────────────
+
+pub fn corpora_list() -> Result<()> {
+    let names = corpus::persist::list()?;
+    if names.is_empty() {
+        eprintln!("no saved corpora (use mr analyze to create one)");
+    } else {
+        for name in &names {
+            let c = corpus::persist::load(name)?;
+            eprintln!("  {:<20} {} grains", name, c.len());
+        }
+    }
+    Ok(())
+}
+
+pub fn corpus_info(name: &str) -> Result<()> {
+    let c = corpus::persist::load(name)?;
+    eprintln!("corpus: {}", name);
+    eprintln!("grains: {}", c.len());
+    if c.len() > 0 {
+        let dims = c.grains()[0].features.dim();
+        eprintln!("dimensions: {}", dims);
+
+        // Show feature stats
+        let features: Vec<corpus::Features> = c.grains().iter().map(|g| g.features.clone()).collect();
+        let stats = corpus::stats::summarize(&features);
+        eprintln!("features:");
+        for (i, s) in stats.iter().enumerate() {
+            eprintln!("  dim {:<3} mean={:>8.2}  std={:>8.2}  min={:>8.2}  max={:>8.2}",
+                i, s.mean, s.stddev, s.min, s.max);
+        }
+
+        // Show duration range
+        let durs: Vec<f64> = c.grains().iter().map(|g| g.duration).collect();
+        let min_dur = durs.iter().cloned().fold(f64::MAX, f64::min);
+        let max_dur = durs.iter().cloned().fold(0.0f64, f64::max);
+        eprintln!("duration: {:.3}s — {:.3}s", min_dur, max_dur);
+    }
+    Ok(())
+}
+
+pub fn corpus_query(
+    name: &str,
+    n: usize,
+    sort: Option<&str>,
+    like: Option<&str>,
+) -> Result<()> {
+    let c = corpus::persist::load(name)?;
+    if c.is_empty() {
+        return Err(Error::Other(format!("corpus '{}' is empty", name)));
+    }
+
+    let results: Vec<&corpus::Grain> = if let Some(audio_path) = like {
+        // Query by similarity to an audio file
+        let path = resolve_audio(audio_path)?;
+        let config = Config::new();
+        let mut feature_values = Vec::new();
+
+        // Extract same features as analyze
+        if let Ok(frames) = corpus::flucoma::analyze::mfcc(&path, 13, &config) {
+            if !frames.is_empty() {
+                let n_frames = frames.len() as f64;
+                let dims = frames[0].len();
+                for d in 1..dims {
+                    let mean: f64 = frames.iter().map(|f| f[d]).sum::<f64>() / n_frames;
+                    feature_values.push(mean);
+                }
+            }
+        }
+        if let Ok(frames) = corpus::flucoma::analyze::spectral_shape(&path, &config) {
+            if !frames.is_empty() {
+                let n_frames = frames.len() as f64;
+                feature_values.push(frames.iter().map(|f| f.centroid).sum::<f64>() / n_frames);
+                feature_values.push(frames.iter().map(|f| f.spread).sum::<f64>() / n_frames);
+                feature_values.push(frames.iter().map(|f| f.flatness).sum::<f64>() / n_frames);
+            }
+        }
+        if let Ok(frames) = corpus::flucoma::analyze::pitch(&path, &config) {
+            if !frames.is_empty() {
+                let confident: Vec<f64> = frames.iter()
+                    .filter(|f| f.confidence > 0.5)
+                    .map(|f| f.hz)
+                    .collect();
+                feature_values.push(if confident.is_empty() { 0.0 } else {
+                    let mut s = confident.clone();
+                    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    s[s.len() / 2]
+                });
+            }
+        }
+        if let Ok(frames) = corpus::flucoma::analyze::loudness(&path, &config) {
+            if !frames.is_empty() {
+                let n_frames = frames.len() as f64;
+                feature_values.push(frames.iter().map(|f| f.loudness).sum::<f64>() / n_frames);
+            }
+        }
+
+        // Pad or truncate to match corpus dimensions
+        let target_dim = c.grains()[0].features.dim();
+        feature_values.resize(target_dim, 0.0);
+
+        // Normalize using corpus params if available
+        let mut target = corpus::Features::new(feature_values);
+        if let Some(params) = c.norm_params() {
+            params.apply(&mut target);
+        }
+
+        c.query(&target, n)
+    } else if let Some(sort_key) = sort {
+        // Sort by a named feature dimension
+        let mut grains: Vec<&corpus::Grain> = c.grains().iter().collect();
+        let reverse = !sort_key.starts_with('-');
+        let key = sort_key.trim_start_matches('-');
+
+        // Map friendly names to dimension indices
+        // Our analyze produces: 12 MFCCs (dims 0-11), centroid (12), spread (13), flatness (14), pitch (15), loudness (16)
+        let dim = match key {
+            "bright" | "centroid" => Some(12),
+            "dark" => { grains.sort_by(|a, b| a.features.get(12).partial_cmp(&b.features.get(12)).unwrap()); Some(usize::MAX) }, // handled
+            "loud" | "loudness" => Some(16),
+            "quiet" => { grains.sort_by(|a, b| a.features.get(16).partial_cmp(&b.features.get(16)).unwrap()); Some(usize::MAX) },
+            "high" | "pitch" => Some(15),
+            "low" => { grains.sort_by(|a, b| a.features.get(15).partial_cmp(&b.features.get(15)).unwrap()); Some(usize::MAX) },
+            "noisy" | "flatness" => Some(14),
+            "duration" | "long" => {
+                grains.sort_by(|a, b| b.duration.partial_cmp(&a.duration).unwrap());
+                Some(usize::MAX)
+            }
+            "short" => {
+                grains.sort_by(|a, b| a.duration.partial_cmp(&b.duration).unwrap());
+                Some(usize::MAX)
+            }
+            d if d.parse::<usize>().is_ok() => Some(d.parse().unwrap()),
+            _ => None,
+        };
+
+        if let Some(d) = dim {
+            if d != usize::MAX {
+                if reverse {
+                    grains.sort_by(|a, b| b.features.get(d).partial_cmp(&a.features.get(d)).unwrap());
+                } else {
+                    grains.sort_by(|a, b| a.features.get(d).partial_cmp(&b.features.get(d)).unwrap());
+                }
+            }
+        } else {
+            return Err(Error::Other(format!(
+                "unknown sort key: '{}'\navailable: bright, dark, loud, quiet, high, low, noisy, long, short, duration, or a dimension number",
+                key
+            )));
+        }
+
+        grains.into_iter().take(n).collect()
+    } else {
+        // Default: just return first N grains
+        c.grains().iter().take(n).collect()
+    };
+
+    // Output as MrData::Grains for piping
+    let grains: Vec<MrGrain> = results.iter().map(|g| MrGrain {
+        path: g.source.clone(),
+        index: g.id,
+        start: g.start,
+        duration: g.duration,
+        source: g.source.clone(),
+    }).collect();
+
+    for g in &results {
+        eprintln!("  {} (dur={:.3}s)", g.source, g.duration);
+    }
+
+    json::write_stdout(&MrData::Grains {
+        source: name.to_string(),
+        sample_rate: 44100,
+        grains,
+    })?;
+
+    Ok(())
+}
+
+pub fn corpus_delete(name: &str) -> Result<()> {
+    if corpus::persist::delete(name)? {
+        eprintln!("deleted corpus '{}'", name);
+    } else {
+        eprintln!("corpus '{}' not found", name);
+    }
+    Ok(())
+}
+
+// ── mr corpus-load ──────────────────────────────────────────────────
+
+pub fn corpus_load(name: &str, track_name: &str) -> Result<()> {
+    let c = corpus::persist::load(name)?;
+    if c.is_empty() {
+        return Err(Error::Other(format!("corpus '{}' is empty", name)));
+    }
+
+    // Find the grain WAV files. They're typically in chops/ directories.
+    let grain_paths = find_grain_files(&c)?;
+    if grain_paths.is_empty() {
+        return Err(Error::Other(
+            "no grain WAV files found — need original grain files from mr slice".into(),
+        ));
+    }
+
+    eprintln!("combining {} grains into single sample...", grain_paths.len());
+
+    // Build combined WAV in ~/.mr/combined/<name>.wav
+    let combined_dir = corpus::persist::corpus_dir()?.join("..").join("combined");
+    std::fs::create_dir_all(&combined_dir)?;
+    let combined_path = combined_dir.join(format!("{name}.wav"));
+
+    // Convert PathBufs to Path refs for combine_wav
+    let refs: Vec<(usize, String, &Path)> = grain_paths
+        .iter()
+        .map(|(id, src, p)| (*id, src.clone(), p.as_path()))
+        .collect();
+
+    let result = corpus::audio::combine_wav(&refs, &combined_path)?;
+
+    eprintln!(
+        "combined: {:.1}s, {} grains → {}",
+        result.total_duration,
+        result.entries.len(),
+        combined_path.display()
+    );
+
+    // Save the grain→sample_start mapping alongside the combined WAV
+    let mapping: Vec<serde_json::Value> = result
+        .entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "grain_id": e.grain_id,
+                "source": e.source,
+                "sample_start": e.sample_start,
+                "duration": e.duration,
+            })
+        })
+        .collect();
+    let mapping_path = combined_dir.join(format!("{name}_mapping.json"));
+    std::fs::write(
+        &mapping_path,
+        serde_json::to_string_pretty(&mapping).unwrap(),
+    )?;
+
+    // Stage the combined sample and create/find the track
+    let filename = crate::track::stage_sample(&combined_path.to_string_lossy())?;
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let session = crate::connect::connect()?;
+    let idx = match crate::connect::resolve_track(&session, track_name) {
+        Ok(idx) => idx,
+        Err(_) => {
+            let track = session.create_midi_track(-1)?;
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            track.set_name(track_name)?;
+            track.track_idx
+        }
+    };
+
+    let track = session.track(idx);
+    // Load by filename (browser search)
+    let stem = Path::new(&filename)
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let load_result = track.load_sample(&filename);
+    if load_result.is_err() {
+        track.load_sample(&stem)?;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    // Set Simpler Volume to 6dB
+    let device = track.device(0);
+    let param_names = device.parameter_names()?;
+    if let Some(vol_idx) = param_names.iter().position(|n| n == "Volume") {
+        device.set_param(vol_idx as i32, 6.0)?;
+    }
+
+    eprintln!(
+        "loaded corpus '{}' into track '{}' ({} grains, {:.1}s)",
+        name,
+        track_name,
+        result.entries.len(),
+        result.total_duration,
+    );
+    eprintln!("mapping saved: {}", mapping_path.display());
+
+    Ok(())
+}
+
+/// Find grain WAV files for a corpus by searching likely directories.
+fn find_grain_files(
+    c: &corpus::Corpus,
+) -> Result<Vec<(usize, String, PathBuf)>> {
+    let mut paths = Vec::new();
+
+    // Collect unique source filenames and their grain IDs
+    for grain in c.grains() {
+        let source = &grain.source;
+
+        // Try to find the file in likely locations
+        let candidates = [
+            PathBuf::from(source),                           // absolute or relative
+            PathBuf::from("chops").join(source),             // chops/<file>
+        ];
+
+        // Also search chops/*/<source> for subdirectories
+        let mut found = None;
+        for candidate in &candidates {
+            if candidate.exists() {
+                found = Some(candidate.clone());
+                break;
+            }
+        }
+
+        // Search chops subdirectories
+        if found.is_none() {
+            if let Ok(entries) = std::fs::read_dir("chops") {
+                for entry in entries.flatten() {
+                    if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        let sub = entry.path().join(source);
+                        if sub.exists() {
+                            found = Some(sub);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(path) = found {
+            paths.push((grain.id, grain.source.clone(), path));
+        }
+    }
+
+    Ok(paths)
+}
+
+// ── mr concat ───────────────────────────────────────────────────────
+
+pub fn concat(
+    source_audio: &str,
+    corpus_name: &str,
+    target: &str,
+    method: &str,
+    threshold: Option<f64>,
+    candidates: usize,
+    seed: Option<u64>,
+    bpm: Option<f64>,
+) -> Result<()> {
+    let source_path = resolve_audio(source_audio)?;
+    let c = corpus::persist::load(corpus_name)?;
+    if c.is_empty() {
+        return Err(Error::Other(format!("corpus '{}' is empty", corpus_name)));
+    }
+
+    // Get tempo for beat conversion
+    let tempo = if let Some(b) = bpm {
+        b
+    } else {
+        let session = crate::connect::connect()?;
+        session.get_tempo()? as f64
+    };
+    let secs_per_beat = 60.0 / tempo;
+
+    // Step 1: Slice source audio
+    eprintln!("slicing source ({})...", method);
+    let config = corpus::flucoma::Config::new();
+    let info = corpus::audio::wav_info(&source_path)?;
+
+    let slice_points = match method {
+        "onset" => {
+            let mut opts = corpus::flucoma::slice::OnsetOpts::default();
+            if let Some(t) = threshold {
+                opts.threshold = t;
+            }
+            corpus::flucoma::slice::onset_slice(&source_path, &opts, &config)?
+        }
+        "novelty" => {
+            let mut opts = corpus::flucoma::slice::NoveltyOpts::default();
+            if let Some(t) = threshold {
+                opts.threshold = t;
+            }
+            corpus::flucoma::slice::novelty_slice(&source_path, &opts, &config)?
+        }
+        "amp" => {
+            let mut opts = corpus::flucoma::slice::AmpOpts::default();
+            if let Some(t) = threshold {
+                opts.on_threshold = t;
+            }
+            corpus::flucoma::slice::amp_slice(&source_path, &opts, &config)?
+        }
+        "transient" => {
+            let mut opts = corpus::flucoma::slice::TransientOpts::default();
+            if let Some(t) = threshold {
+                opts.threshold = t;
+            }
+            corpus::flucoma::slice::transient_slice(&source_path, &opts, &config)?
+        }
+        other => return Err(Error::Other(format!("unknown slice method: {other}"))),
+    };
+
+    // Build onset boundaries in seconds
+    let sr = info.sample_rate as f64;
+    let total_secs = info.num_frames as f64 / sr;
+    let mut boundaries_secs: Vec<f64> = vec![0.0];
+    for &p in &slice_points {
+        boundaries_secs.push(p as f64 / sr);
+    }
+    boundaries_secs.push(total_secs);
+    boundaries_secs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    boundaries_secs.dedup();
+
+    eprintln!("  {} segments", boundaries_secs.len() - 1);
+
+    // Step 2: Split source into temp grains and extract features
+    let temp_dir = tempfile::tempdir()?;
+    let temp_out = temp_dir.path().join("segments");
+
+    let frame_points: Vec<usize> = slice_points.clone();
+    let splits = corpus::audio::split_wav(&source_path, &frame_points, &temp_out, 0)?;
+
+    eprintln!("extracting features from {} segments...", splits.len());
+
+    let mut segments: Vec<(f64, f64, corpus::Features)> = Vec::new();
+
+    for (i, split) in splits.iter().enumerate() {
+        let onset_secs = split.start_sample as f64 / sr;
+        let dur_secs = split.duration_secs;
+
+        let mut feature_values: Vec<f64> = Vec::new();
+
+        // MFCC (12 coefficients, skip coeff 0)
+        if let Ok(frames) = corpus::flucoma::analyze::mfcc(&split.path, 13, &config) {
+            if !frames.is_empty() {
+                let n = frames.len() as f64;
+                let dims = frames[0].len();
+                for d in 1..dims {
+                    let mean: f64 = frames.iter().map(|f| f[d]).sum::<f64>() / n;
+                    feature_values.push(mean);
+                }
+            }
+        }
+        if feature_values.is_empty() {
+            feature_values.extend_from_slice(&[0.0; 12]);
+        }
+
+        // Spectral shape (centroid, spread, flatness)
+        if let Ok(frames) = corpus::flucoma::analyze::spectral_shape(&split.path, &config) {
+            if !frames.is_empty() {
+                let n = frames.len() as f64;
+                feature_values.push(frames.iter().map(|f| f.centroid).sum::<f64>() / n);
+                feature_values.push(frames.iter().map(|f| f.spread).sum::<f64>() / n);
+                feature_values.push(frames.iter().map(|f| f.flatness).sum::<f64>() / n);
+            } else {
+                feature_values.extend_from_slice(&[0.0; 3]);
+            }
+        } else {
+            feature_values.extend_from_slice(&[0.0; 3]);
+        }
+
+        // Pitch
+        if let Ok(frames) = corpus::flucoma::analyze::pitch(&split.path, &config) {
+            let confident: Vec<f64> = frames
+                .iter()
+                .filter(|f| f.confidence > 0.5)
+                .map(|f| f.hz)
+                .collect();
+            let pitch = if confident.is_empty() {
+                0.0
+            } else {
+                let mut sorted = confident;
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                sorted[sorted.len() / 2]
+            };
+            feature_values.push(pitch);
+        } else {
+            feature_values.push(0.0);
+        }
+
+        // Loudness
+        if let Ok(frames) = corpus::flucoma::analyze::loudness(&split.path, &config) {
+            if !frames.is_empty() {
+                let n = frames.len() as f64;
+                feature_values.push(frames.iter().map(|f| f.loudness).sum::<f64>() / n);
+            } else {
+                feature_values.push(0.0);
+            }
+        } else {
+            feature_values.push(0.0);
+        }
+
+        // Pad/truncate to match corpus dimensions
+        let target_dim = c.grains()[0].features.dim();
+        feature_values.resize(target_dim, 0.0);
+
+        let mut features = corpus::Features::new(feature_values);
+        if let Some(params) = c.norm_params() {
+            params.apply(&mut features);
+        }
+
+        eprint!("\r  {}/{}", i + 1, splits.len());
+        segments.push((onset_secs, dur_secs, features));
+    }
+    eprintln!();
+
+    // Step 3: Mosaic match
+    eprintln!("matching against corpus '{}'...", corpus_name);
+    let opts = corpus::concat::MosaicOpts {
+        candidates,
+        seed,
+        weights: None,
+    };
+    let matches = corpus::concat::mosaic(&segments, &c, &opts);
+
+    // Report matches
+    let avg_dist: f64 = matches.iter().map(|m| m.distance).sum::<f64>() / matches.len() as f64;
+    eprintln!(
+        "  {} matches, avg distance: {:.3}",
+        matches.len(),
+        avg_dist
+    );
+
+    // Step 4: Load the corpus-load mapping to get grain→sample_start
+    let combined_dir = corpus::persist::corpus_dir()?.join("..").join("combined");
+    let mapping_path = combined_dir.join(format!("{corpus_name}_mapping.json"));
+
+    if !mapping_path.exists() {
+        return Err(Error::Other(format!(
+            "no corpus mapping found — run `mr corpus-load {} <track>` first",
+            corpus_name
+        )));
+    }
+
+    let mapping_json = std::fs::read_to_string(&mapping_path)?;
+    let mapping: Vec<serde_json::Value> = serde_json::from_str(&mapping_json)?;
+
+    // Build grain_id → sample_start lookup
+    let mut grain_start: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
+    for entry in &mapping {
+        if let (Some(id), Some(ss)) = (
+            entry["grain_id"].as_u64(),
+            entry["sample_start"].as_f64(),
+        ) {
+            grain_start.insert(id as usize, ss);
+        }
+    }
+
+    // Step 5: Write to Ableton — notes + S Start automation
+    let (track_name, slot) = crate::connect::parse_target(target)?;
+    let session = crate::connect::connect()?;
+    let idx = crate::connect::resolve_track(&session, track_name)?;
+    let track = session.track(idx);
+
+    // Calculate clip length in beats
+    let total_beats = total_secs / secs_per_beat;
+    let clip_length = (total_beats.ceil()).max(1.0);
+
+    // Create the clip
+    if track.has_clip(slot)? {
+        track.delete_clip(slot)?;
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let clip = track.create_clip(slot, clip_length as f32)?;
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    clip.set_name(&format!("concat:{corpus_name}"))?;
+    clip.set_looping(true)?;
+
+    // Write notes — all at pitch 60 (Simpler default), timed to onsets
+    let notes: Vec<ableton::Note> = matches
+        .iter()
+        .map(|m| {
+            let start_beats = m.source_onset / secs_per_beat;
+            let dur_beats = (m.source_duration / secs_per_beat).max(0.05);
+            ableton::Note::new(60, start_beats as f32, dur_beats as f32, 100)
+        })
+        .collect();
+
+    for chunk in notes.chunks(80) {
+        clip.add_notes(chunk)?;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    // Write S Start automation — set value just before each note
+    let device = track.device(0);
+    let param_names = device.parameter_names()?;
+    let s_start_idx = param_names
+        .iter()
+        .position(|n| n.contains("S Start") || n.contains("Start"))
+        .ok_or_else(|| Error::Other("Simpler 'S Start' parameter not found".into()))?
+        as i32;
+
+    // Build automation points: for each match, set S Start to the grain's position
+    let mut auto_points: Vec<(f32, f32)> = Vec::new();
+    for m in &matches {
+        let beat = (m.source_onset / secs_per_beat) as f32;
+        let sample_start = grain_start.get(&m.grain_id).copied().unwrap_or(0.0) as f32;
+
+        // Set value slightly before the note triggers
+        let pre = (beat - 0.01).max(0.0);
+        auto_points.push((pre, sample_start));
+        auto_points.push((beat, sample_start));
+    }
+
+    if !auto_points.is_empty() {
+        clip.automate_smooth(0, s_start_idx, &auto_points, 0.0)?;
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    clip.fire()?;
+
+    eprintln!(
+        "wrote {} notes + S Start automation to {}:{} ({:.1} beats @ {:.0} bpm)",
+        notes.len(),
+        track_name,
+        slot,
+        clip_length,
+        tempo,
+    );
+
+    // Print top matches for interest
+    eprintln!("\nmatches:");
+    for m in matches.iter().take(10) {
+        eprintln!(
+            "  {:.2}s → {} (dist: {:.3})",
+            m.source_onset, m.grain_source, m.distance
+        );
+    }
+    if matches.len() > 10 {
+        eprintln!("  ... and {} more", matches.len() - 10);
+    }
+
+    Ok(())
+}
+
 fn chrono_now() -> String {
     "exported by mr".to_string()
 }
 
-/// Compute relative path from `base` to `target`, with trailing slash.
-fn pathdiff(target: &Path, base: &Path) -> String {
-    if target == base {
-        return "./".to_string();
+/// Convert a POSIX path to Mac HFS-style colon path.
+/// `/Users/foo/bar/` → `Macintosh HD:/Users/foo/bar/`
+fn posix_to_hfs(path: &Path) -> String {
+    let posix = path.to_string_lossy();
+    let mut hfs = format!("Macintosh HD:{}", posix.replace('/', ":"));
+    if !hfs.ends_with(':') {
+        hfs.push(':');
     }
-    // Try to strip base prefix
-    if let Ok(rel) = target.strip_prefix(base) {
-        let mut s = rel.to_string_lossy().to_string();
-        if !s.ends_with('/') {
-            s.push('/');
-        }
-        return s;
-    }
-    // Fallback: just use the target dir name
-    let mut s = target
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    if !s.ends_with('/') {
-        s.push('/');
-    }
-    s
+    hfs
 }
