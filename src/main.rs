@@ -639,6 +639,16 @@ enum Cmd {
         out: String,
     },
 
+    /// Export a saved corpus as FluCoMa fluid.dataset~ JSON (for M4L devices)
+    #[command(name = "export-flucoma")]
+    ExportFlucoma {
+        /// Corpus name
+        name: String,
+        /// Output JSON file path
+        #[arg(long)]
+        out: String,
+    },
+
     /// List saved corpora
     #[command(name = "corpora")]
     Corpora,
@@ -994,10 +1004,14 @@ enum VizCmd {
 #[derive(Subcommand)]
 enum PipeCmd {
     /// Enable frame pipe (creates /tmp/mr-viz.pipe)
-    On,
+    On {
+        /// Only send every Nth frame (default 2 = 30fps pipe from 60fps render)
+        #[arg(long, default_value = "2")]
+        frame_skip: u32,
+    },
     /// Disable frame pipe
     Off,
-    /// Show pipe status (frames written/dropped)
+    /// Show pipe status (frames written/dropped/skipped)
     Status,
 }
 
@@ -1369,7 +1383,7 @@ fn main() {
                 )
             }
             VizCmd::Pipe { cmd } => match cmd {
-                PipeCmd::On => viz::pipe_enable(),
+                PipeCmd::On { frame_skip } => viz::pipe_enable(frame_skip),
                 PipeCmd::Off => viz::pipe_disable(),
                 PipeCmd::Status => viz::pipe_status(),
             },
@@ -1433,6 +1447,9 @@ fn main() {
         }
         Cmd::Export { grain_dir, out } => {
             audio::export_sp_tools(&grain_dir, &out)
+        }
+        Cmd::ExportFlucoma { name, out } => {
+            audio::export_flucoma(&name, &out)
         }
         Cmd::Corpora => audio::corpora_list(),
         Cmd::CorpusInfo { name } => audio::corpus_info(&name),

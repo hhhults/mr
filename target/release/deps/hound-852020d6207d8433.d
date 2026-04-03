@@ -1,0 +1,9 @@
+/Users/harperhults/musictools/mr/target/release/deps/hound-852020d6207d8433.d: /Users/harperhults/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hound-3.5.1/src/lib.rs /Users/harperhults/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hound-3.5.1/src/read.rs /Users/harperhults/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hound-3.5.1/src/write.rs
+
+/Users/harperhults/musictools/mr/target/release/deps/libhound-852020d6207d8433.rlib: /Users/harperhults/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hound-3.5.1/src/lib.rs /Users/harperhults/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hound-3.5.1/src/read.rs /Users/harperhults/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hound-3.5.1/src/write.rs
+
+/Users/harperhults/musictools/mr/target/release/deps/libhound-852020d6207d8433.rmeta: /Users/harperhults/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hound-3.5.1/src/lib.rs /Users/harperhults/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hound-3.5.1/src/read.rs /Users/harperhults/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hound-3.5.1/src/write.rs
+
+/Users/harperhults/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hound-3.5.1/src/lib.rs:
+/Users/harperhults/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hound-3.5.1/src/read.rs:
+/Users/harperhults/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hound-3.5.1/src/write.rs:

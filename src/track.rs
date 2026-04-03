@@ -143,6 +143,29 @@ pub fn create(
     Ok(())
 }
 
+pub fn pad_sample(track_name: &str, pad_note: i32, sample_path: &str) -> Result<()> {
+    let session = connect::connect()?;
+    let idx = connect::resolve_track(&session, track_name)?;
+
+    // Stage sample into User Library
+    let filename = stage_sample(sample_path)?;
+    thread::sleep(Duration::from_millis(300));
+
+    // Try exact filename first, then stem
+    let result = session.load_sample_pad(idx, 0, pad_note, &filename);
+    if result.is_err() {
+        let stem = Path::new(&filename)
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        session.load_sample_pad(idx, 0, pad_note, &stem)?;
+    }
+    thread::sleep(Duration::from_millis(300));
+    eprintln!("pad {} ← {} on \"{}\"", pad_note, filename, track_name);
+    Ok(())
+}
+
 pub fn effect(track_name: &str, effect_name: &str) -> Result<()> {
     // Route through daemon if running
     if daemon::is_running() {

@@ -944,6 +944,69 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     }
 }
 
+// ── mr export-flucoma ───────────────────────────────────────────────
+
+/// Export a saved corpus as fluid.dataset~ JSON for use in Max/FluCoMa.
+///
+/// Produces a JSON file that `fluid.dataset~` can load via its `load` message.
+/// Also exports the grain-to-time mapping for playback.
+pub fn export_flucoma(name: &str, output: &str) -> Result<()> {
+    let c = corpus::persist::load(name)?;
+    if c.is_empty() {
+        return Err(Error::Other(format!("corpus '{}' is empty", name)));
+    }
+
+    let dim = c.grains()[0].features.dim();
+
+    // Build fluid.dataset~ format: {"cols": N, "data": {"id": [v1, v2, ...], ...}}
+    let mut data = serde_json::Map::new();
+    for grain in c.grains() {
+        data.insert(
+            grain.id.to_string(),
+            json!(grain.features.as_slice()),
+        );
+    }
+
+    let dataset = json!({
+        "cols": dim,
+        "data": data
+    });
+
+    // Also build a lookup table: grain_id → {source, start_ms, duration_ms}
+    let mut lookup = serde_json::Map::new();
+    for grain in c.grains() {
+        lookup.insert(
+            grain.id.to_string(),
+            json!({
+                "source": grain.source,
+                "start": grain.start,
+                "duration": grain.duration,
+            }),
+        );
+    }
+
+    // Write both to the output path
+    let out_path = PathBuf::from(track::shellexpand(output));
+
+    // Dataset file
+    let dataset_json = serde_json::to_string_pretty(&dataset)?;
+    std::fs::write(&out_path, &dataset_json)?;
+    eprintln!(
+        "exported {} grains ({} dims) → {}",
+        c.len(),
+        dim,
+        out_path.display()
+    );
+
+    // Lookup file (same name with _lookup suffix)
+    let lookup_path = out_path.with_extension("").to_string_lossy().to_string() + "_lookup.json";
+    let lookup_json = serde_json::to_string_pretty(&json!({"data": lookup}))?;
+    std::fs::write(&lookup_path, &lookup_json)?;
+    eprintln!("lookup → {}", lookup_path);
+
+    Ok(())
+}
+
 // ── mr corpora ──────────────────────────────────────────────────────
 
 pub fn corpora_list() -> Result<()> {

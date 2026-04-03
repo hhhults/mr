@@ -1,0 +1,15 @@
+/Users/harperhults/musictools/mr/target/debug/deps/ableton-94cfc516741b9f98.d: /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/lib.rs /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/clip.rs /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/compiler.rs /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/device.rs /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/error.rs /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/live.rs /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/osc.rs /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/session.rs /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/track.rs /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/transport.rs /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/udp.rs
+
+/Users/harperhults/musictools/mr/target/debug/deps/libableton-94cfc516741b9f98.rmeta: /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/lib.rs /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/clip.rs /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/compiler.rs /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/device.rs /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/error.rs /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/live.rs /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/osc.rs /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/session.rs /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/track.rs /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/transport.rs /Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/udp.rs
+
+/Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/lib.rs:
+/Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/clip.rs:
+/Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/compiler.rs:
+/Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/device.rs:
+/Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/error.rs:
+/Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/live.rs:
+/Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/osc.rs:
+/Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/session.rs:
+/Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/track.rs:
+/Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/transport.rs:
+/Users/harperhults/.cargo/git/checkouts/ableton-rs-7a8a63555723d40a/949500b/src/udp.rs:
