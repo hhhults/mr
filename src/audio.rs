@@ -1538,20 +1538,25 @@ pub fn concat(
         .ok_or_else(|| Error::Other("Simpler 'S Start' parameter not found".into()))?
         as i32;
 
-    // Build automation points: for each match, set S Start to the grain's position
-    let mut auto_points: Vec<(f32, f32)> = Vec::new();
-    for m in &matches {
+    // Build automation steps: for each match, set S Start to the grain's position
+    // Using automate() directly for step-wise values (not smooth interpolation)
+    let mut auto_steps: Vec<(f32, f32, f32)> = Vec::new();
+    for (i, m) in matches.iter().enumerate() {
         let beat = (m.source_onset / secs_per_beat) as f32;
         let sample_start = grain_start.get(&m.grain_id).copied().unwrap_or(0.0) as f32;
 
-        // Set value slightly before the note triggers
-        let pre = (beat - 0.01).max(0.0);
-        auto_points.push((pre, sample_start));
-        auto_points.push((beat, sample_start));
+        // Duration until next onset (or end of clip)
+        let next_beat = matches
+            .get(i + 1)
+            .map(|m| (m.source_onset / secs_per_beat) as f32)
+            .unwrap_or(clip_length as f32);
+        let dur = (next_beat - beat).max(0.01);
+
+        auto_steps.push((beat, dur, sample_start));
     }
 
-    if !auto_points.is_empty() {
-        clip.automate_smooth(0, s_start_idx, &auto_points, 0.0)?;
+    if !auto_steps.is_empty() {
+        clip.automate(0, s_start_idx, &auto_steps)?;
     }
 
     std::thread::sleep(std::time::Duration::from_millis(50));
