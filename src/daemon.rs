@@ -11,7 +11,7 @@ use std::io::{BufRead, BufReader, Write as IoWrite};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use std::{fs, process, thread};
 
@@ -119,6 +119,11 @@ pub struct DaemonRequest {
     // Batch query fields
     #[serde(default)]
     pub queries: Vec<BatchQueryEntry>,
+    // Pipelining fields
+    #[serde(default)]
+    pub request_id: u64,
+    #[serde(default)]
+    pub priority: String,
 }
 
 impl Default for DaemonRequest {
@@ -157,6 +162,8 @@ impl Default for DaemonRequest {
             address: String::new(),
             osc_args: Vec::new(),
             timeout_ms: None,
+            request_id: 0,
+            priority: String::new(),
         }
     }
 }
@@ -181,6 +188,8 @@ pub struct DaemonResponse {
     pub result: Option<Vec<Arg>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub results: Option<Vec<Vec<Arg>>>,
+    #[serde(default)]
+    pub request_id: u64,
 }
 
 impl DaemonResponse {
@@ -192,6 +201,7 @@ impl DaemonResponse {
             update_kind: None,
             result: None,
             results: None,
+            request_id: 0,
         }
     }
 
@@ -203,6 +213,7 @@ impl DaemonResponse {
             update_kind: Some(kind.into()),
             result: None,
             results: None,
+            request_id: 0,
         }
     }
 
@@ -214,6 +225,7 @@ impl DaemonResponse {
             update_kind: None,
             result: Some(result),
             results: None,
+            request_id: 0,
         }
     }
 
@@ -225,6 +237,7 @@ impl DaemonResponse {
             update_kind: None,
             result: None,
             results: Some(results),
+            request_id: 0,
         }
     }
 
@@ -236,6 +249,146 @@ impl DaemonResponse {
             update_kind: None,
             result: None,
             results: None,
+            request_id: 0,
+        }
+    }
+}
+
+// ─── Tick batcher ────────────────────────────────────────────────────────────
+
+struct PendingQuery {
+    address: String,
+    args: Vec<Arg>,
+    timeout: Duration,
+    tx: std::sync::mpsc::Sender<ableton::Result<Vec<Arg>>>,
+}
+
+struct Batcher {
+    pending: Mutex<Vec<PendingQuery>>,
+    notify: Condvar,
+}
+
+impl Batcher {
+    fn new() -> Self {
+        Batcher {
+            pending: Mutex::new(Vec::new()),
+            notify: Condvar::new(),
+        }
+    }
+
+    fn submit(
+        &self,
+        address: String,
+        args: Vec<Arg>,
+        timeout: Duration,
+    ) -> std::sync::mpsc::Receiver<ableton::Result<Vec<Arg>>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut pending = self.pending.lock().unwrap();
+        pending.push(PendingQuery { address, args, timeout, tx });
+        drop(pending);
+        self.notify.notify_one();
+        rx
+    }
+
+    fn submit_batch(
+        &self,
+        queries: Vec<(String, Vec<Arg>)>,
+        timeout: Duration,
+    ) -> Vec<std::sync::mpsc::Receiver<ableton::Result<Vec<Arg>>>> {
+        let mut receivers = Vec::with_capacity(queries.len());
+        let mut pending = self.pending.lock().unwrap();
+        for (address, args) in queries {
+            let (tx, rx) = std::sync::mpsc::channel();
+            pending.push(PendingQuery { address, args, timeout, tx });
+            receivers.push(rx);
+        }
+        drop(pending);
+        self.notify.notify_one();
+        receivers
+    }
+}
+
+fn batcher_flush_loop(
+    batcher: &Batcher,
+    session: &Session,
+    shutdown: &AtomicBool,
+) {
+    const MAX_BATCH: usize = 64;
+    const COALESCE_MS: u64 = 5;
+    const IDLE_TIMEOUT_MS: u64 = 500;
+
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let batch = {
+            let mut lock = batcher.pending.lock().unwrap();
+
+            // Wait for at least one query
+            while lock.is_empty() {
+                let (guard, _) = batcher
+                    .notify
+                    .wait_timeout(lock, Duration::from_millis(IDLE_TIMEOUT_MS))
+                    .unwrap();
+                lock = guard;
+                if shutdown.load(Ordering::Relaxed) {
+                    for pq in lock.drain(..) {
+                        let _ = pq.tx.send(Err(ableton::Error::Ableton(
+                            "daemon shutting down".into(),
+                        )));
+                    }
+                    return;
+                }
+            }
+
+            // Brief coalescing window unless already at max batch size
+            if lock.len() < MAX_BATCH {
+                let (guard, _) = batcher
+                    .notify
+                    .wait_timeout(lock, Duration::from_millis(COALESCE_MS))
+                    .unwrap();
+                lock = guard;
+            }
+
+            std::mem::take(&mut *lock)
+        };
+
+        if batch.is_empty() {
+            continue;
+        }
+
+        let timeout = batch
+            .iter()
+            .map(|p| p.timeout)
+            .max()
+            .unwrap_or(Duration::from_secs(2));
+
+        let queries: Vec<(String, Vec<Arg>)> = batch
+            .iter()
+            .map(|p| (p.address.clone(), p.args.clone()))
+            .collect();
+
+        match session.osc().batch_query_timeout(&queries, timeout) {
+            Ok(results) => {
+                let mut result_iter = results.into_iter();
+                for pq in batch {
+                    match result_iter.next() {
+                        Some(result) => {
+                            let _ = pq.tx.send(Ok(result));
+                        }
+                        None => {
+                            let _ = pq.tx.send(Ok(vec![]));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                for pq in batch {
+                    let _ = pq.tx.send(Err(ableton::Error::Ableton(msg.clone())));
+                }
+            }
         }
     }
 }
@@ -280,6 +433,7 @@ struct SharedState {
     listeners_ready: AtomicBool,
     /// Cached param names: (track_idx, device_idx, param_idx) → name.
     param_name_cache: Mutex<HashMap<(i32, i32, i32), String>>,
+    batcher: Batcher,
 }
 
 fn refresh_track_cache(state: &SharedState) -> Result<()> {
@@ -363,7 +517,7 @@ fn poll_ableton_state(state: &SharedState) {
 // ─── Request handlers ───────────────────────────────────────────────────────
 
 fn handle_request(state: &Arc<SharedState>, req: &DaemonRequest) -> DaemonResponse {
-    match req.cmd.as_str() {
+    let mut resp = match req.cmd.as_str() {
         "query" => handle_proxy_query(state, req),
         "batch_query" => handle_batch_query(state, req),
         "send" => handle_proxy_send(state, req),
@@ -397,7 +551,9 @@ fn handle_request(state: &Arc<SharedState>, req: &DaemonRequest) -> DaemonRespon
         "walk_stop_all" => handle_walk_stop_all(state),
         "shutdown" => DaemonResponse::ok("shutting down"),
         _ => DaemonResponse::err(format!("unknown command: {}", req.cmd)),
-    }
+    };
+    resp.request_id = req.request_id;
+    resp
 }
 
 fn handle_proxy_query(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
@@ -405,13 +561,26 @@ fn handle_proxy_query(state: &SharedState, req: &DaemonRequest) -> DaemonRespons
         .timeout_ms
         .map(Duration::from_millis)
         .unwrap_or(Duration::from_secs(2));
-    match state
-        .session
-        .osc()
-        .query_timeout(&req.address, &req.osc_args, timeout)
-    {
-        Ok(result) => DaemonResponse::ok_with_result(result),
-        Err(e) => DaemonResponse::err(e.to_string()),
+
+    // Immediate priority bypasses the batcher
+    if req.priority == "immediate" {
+        return match state
+            .session
+            .osc()
+            .query_timeout(&req.address, &req.osc_args, timeout)
+        {
+            Ok(result) => DaemonResponse::ok_with_result(result),
+            Err(e) => DaemonResponse::err(e.to_string()),
+        };
+    }
+
+    let rx = state
+        .batcher
+        .submit(req.address.clone(), req.osc_args.clone(), timeout);
+    match rx.recv() {
+        Ok(Ok(result)) => DaemonResponse::ok_with_result(result),
+        Ok(Err(e)) => DaemonResponse::err(e.to_string()),
+        Err(_) => DaemonResponse::err("batcher channel closed"),
     }
 }
 
@@ -425,10 +594,25 @@ fn handle_batch_query(state: &SharedState, req: &DaemonRequest) -> DaemonRespons
         .iter()
         .map(|q| (q.address.clone(), q.args.clone()))
         .collect();
-    match state.session.osc().batch_query_timeout(&queries, timeout) {
-        Ok(results) => DaemonResponse::ok_with_results(results),
-        Err(e) => DaemonResponse::err(e.to_string()),
+
+    // Immediate priority bypasses the batcher
+    if req.priority == "immediate" {
+        return match state.session.osc().batch_query_timeout(&queries, timeout) {
+            Ok(results) => DaemonResponse::ok_with_results(results),
+            Err(e) => DaemonResponse::err(e.to_string()),
+        };
     }
+
+    let receivers = state.batcher.submit_batch(queries, timeout);
+    let mut results = Vec::with_capacity(receivers.len());
+    for rx in receivers {
+        match rx.recv() {
+            Ok(Ok(result)) => results.push(result),
+            Ok(Err(e)) => return DaemonResponse::err(e.to_string()),
+            Err(_) => return DaemonResponse::err("batcher channel closed"),
+        }
+    }
+    DaemonResponse::ok_with_results(results)
 }
 
 fn handle_proxy_send(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
@@ -1090,6 +1274,7 @@ fn handle_walk(state: &Arc<SharedState>, req: &DaemonRequest) -> DaemonResponse 
         update_kind: None,
         result: None,
         results: None,
+        request_id: 0,
     }
 }
 
@@ -1433,6 +1618,7 @@ pub fn run_daemon() -> Result<()> {
         recent_broadcasts: Mutex::new(HashMap::new()),
         listeners_ready: AtomicBool::new(false),
         param_name_cache: Mutex::new(HashMap::new()),
+        batcher: Batcher::new(),
     });
 
     // Start listener immediately so the parent process sees us as running
@@ -1450,6 +1636,18 @@ pub fn run_daemon() -> Result<()> {
     fs::write(pid_path(), process::id().to_string())?;
 
     let shutdown = Arc::new(AtomicBool::new(false));
+
+    // Start batcher flush thread for query coalescing
+    {
+        let state = state.clone();
+        let shutdown = shutdown.clone();
+        thread::Builder::new()
+            .name("batcher-flush".into())
+            .spawn(move || {
+                batcher_flush_loop(&state.batcher, &state.session, &shutdown);
+            })
+            .expect("failed to spawn batcher thread");
+    }
 
     // Warm caches, sync state, then register Ableton listeners
     {
