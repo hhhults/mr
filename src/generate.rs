@@ -18,6 +18,7 @@ pub fn scale(root: &str, mode: &str, octaves: usize, duration: f64, velocity: i3
                     start: t,
                     duration,
                     velocity,
+                ..Default::default()
                 });
                 t += duration;
             }
@@ -53,6 +54,7 @@ pub fn euclidean(
                 start: i as f64 * duration,
                 duration,
                 velocity,
+                ..Default::default()
             });
         }
     }
@@ -71,6 +73,7 @@ pub fn chord(spec: &str, duration: f64, velocity: i32) -> Result<()> {
             start: 0.0,
             duration,
             velocity,
+                ..Default::default()
         })
         .collect();
 
@@ -110,6 +113,7 @@ pub fn notes(notation: &str) -> Result<()> {
             start: t,
             duration: dur,
             velocity: vel,
+                ..Default::default()
         });
         t += dur;
     }
@@ -223,5 +227,45 @@ mod tests {
         let bools = bjorklund(5, 16);
         assert_eq!(bools.iter().filter(|&&b| b).count(), 5);
         assert_eq!(bools.len(), 16);
+    }
+
+    #[test]
+    fn test_chord_major_triad() {
+        let (root, intervals) = parse_chord_spec("C").unwrap();
+        assert_eq!(root, 60);
+        let notes: Vec<i32> = intervals.iter().map(|&i| root + i as i32).collect();
+        assert_eq!(notes, vec![60, 64, 67]); // C E G
+    }
+
+    #[test]
+    fn test_chord_minor() {
+        let (root, intervals) = parse_chord_spec("Am").unwrap();
+        assert_eq!(root, 69);
+        let notes: Vec<i32> = intervals.iter().map(|&i| root + i as i32).collect();
+        assert_eq!(notes, vec![69, 72, 76]); // A C E
+    }
+
+    #[test]
+    fn test_chord_dom7() {
+        let (root, intervals) = parse_chord_spec("G7").unwrap();
+        assert_eq!(root, 67);
+        let notes: Vec<i32> = intervals.iter().map(|&i| root + i as i32).collect();
+        assert_eq!(notes, vec![67, 71, 74, 77]); // G B D F
+    }
+
+    #[test]
+    fn test_chord_sharp_flat() {
+        let (root, _) = parse_chord_spec("F#").unwrap();
+        assert_eq!(root, 66);
+        let (root, _) = parse_chord_spec("Bb").unwrap();
+        assert_eq!(root, 70);
+    }
+
+    #[test]
+    fn test_bjorklund_edge_cases() {
+        assert_eq!(bjorklund(0, 0), Vec::<bool>::new());
+        assert_eq!(bjorklund(1, 4), vec![true, false, false, false]);
+        // All hits
+        assert_eq!(bjorklund(8, 8), vec![true; 8]);
     }
 }

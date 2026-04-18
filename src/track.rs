@@ -166,6 +166,114 @@ pub fn pad_sample(track_name: &str, pad_note: i32, sample_path: &str) -> Result<
     Ok(())
 }
 
+// ---------- Simpler slice helpers ----------
+
+pub fn slices(track_name: &str, pad: Option<i32>) -> Result<()> {
+    let session = connect::connect()?;
+    let idx = connect::resolve_track(&session, track_name)?;
+    let length = session.simpler_sample_length(idx, 0, pad).unwrap_or(0.0);
+    let positions = session.simpler_slices(idx, 0, pad)?;
+    eprintln!(
+        "simpler {}{} — sample {} samples — {} slices",
+        track_name,
+        pad.map(|p| format!(":pad{}", p)).unwrap_or_default(),
+        length as i64,
+        positions.len()
+    );
+    for (i, p) in positions.iter().enumerate() {
+        eprintln!("  [{}] {:.0} samples", i, p);
+    }
+    Ok(())
+}
+
+pub fn slice_add(track_name: &str, pad: Option<i32>, time: f32) -> Result<()> {
+    let session = connect::connect()?;
+    let idx = connect::resolve_track(&session, track_name)?;
+    session.simpler_insert_slice(idx, 0, pad, time)?;
+    eprintln!(
+        "slice added at {:.0} on {}{}",
+        time,
+        track_name,
+        pad.map(|p| format!(":pad{}", p)).unwrap_or_default()
+    );
+    Ok(())
+}
+
+pub fn slice_clear(track_name: &str, pad: Option<i32>) -> Result<()> {
+    let session = connect::connect()?;
+    let idx = connect::resolve_track(&session, track_name)?;
+    session.simpler_clear_slices(idx, 0, pad)?;
+    eprintln!(
+        "cleared slices on {}{}",
+        track_name,
+        pad.map(|p| format!(":pad{}", p)).unwrap_or_default()
+    );
+    Ok(())
+}
+
+pub fn simpler_mode(track_name: &str, pad: Option<i32>, mode: &str) -> Result<()> {
+    let mode_num = match mode.to_lowercase().as_str() {
+        "classic" | "0" => 0,
+        "one-shot" | "oneshot" | "1" => 1,
+        "slicing" | "slice" | "2" => 2,
+        other => {
+            return Err(crate::error::Error::Other(format!(
+                "unknown mode '{}' — use classic, one-shot, or slicing",
+                other
+            )))
+        }
+    };
+    let session = connect::connect()?;
+    let idx = connect::resolve_track(&session, track_name)?;
+    session.simpler_set_playback_mode(idx, 0, pad, mode_num)?;
+    eprintln!(
+        "simpler mode = {} on {}{}",
+        mode,
+        track_name,
+        pad.map(|p| format!(":pad{}", p)).unwrap_or_default()
+    );
+    Ok(())
+}
+
+pub fn slice_reset(track_name: &str, pad: Option<i32>) -> Result<()> {
+    let session = connect::connect()?;
+    let idx = connect::resolve_track(&session, track_name)?;
+    session.simpler_reset_slices(idx, 0, pad)?;
+    eprintln!(
+        "reset slices on {}{}",
+        track_name,
+        pad.map(|p| format!(":pad{}", p)).unwrap_or_default()
+    );
+    Ok(())
+}
+
+pub fn swap(track_name: &str, device_idx: i32, preset_name: &str) -> Result<()> {
+    let session = connect::connect()?;
+    let idx = connect::resolve_track(&session, track_name)?;
+    let name = session.hotswap_device(idx, device_idx, preset_name)?;
+    thread::sleep(Duration::from_millis(300));
+    eprintln!("swap dev[{}] on \"{}\" <- {}", device_idx, track_name, name);
+    Ok(())
+}
+
+pub fn drum_rack(track_name: &str) -> Result<()> {
+    let session = connect::connect()?;
+    let idx = connect::resolve_track(&session, track_name)?;
+    let name = session.load_drum_rack(idx)?;
+    thread::sleep(Duration::from_millis(300));
+    eprintln!("drum rack → \"{}\" ({})", track_name, name);
+    Ok(())
+}
+
+pub fn pad_load(track_name: &str, pad_note: i32, device_name: &str) -> Result<()> {
+    let session = connect::connect()?;
+    let idx = connect::resolve_track(&session, track_name)?;
+    let name = session.load_device_pad(idx, 0, pad_note, device_name)?;
+    thread::sleep(Duration::from_millis(400));
+    eprintln!("pad {} ← {} on \"{}\"", pad_note, name, track_name);
+    Ok(())
+}
+
 pub fn effect(track_name: &str, effect_name: &str) -> Result<()> {
     // Route through daemon if running
     if daemon::is_running() {
@@ -215,6 +323,55 @@ pub fn delete(name: &str) -> Result<()> {
     let idx = connect::resolve_track(&session, name)?;
     session.delete_track(idx)?;
     eprintln!("deleted track \"{}\"", name);
+    Ok(())
+}
+
+pub fn route(
+    track_name: &str,
+    input: Option<&str>,
+    input_channel: Option<&str>,
+    output: Option<&str>,
+    output_channel: Option<&str>,
+) -> Result<()> {
+    let session = connect::connect()?;
+    let idx = connect::resolve_track(&session, track_name)?;
+    let track = session.track(idx);
+
+    // If no flags, show current routing
+    if input.is_none() && input_channel.is_none() && output.is_none() && output_channel.is_none() {
+        let in_type = track.get_input_routing_type()?;
+        let in_ch = track.get_input_routing_channel()?;
+        let out_type = track.get_output_routing_type()?;
+        let out_ch = track.get_output_routing_channel()?;
+
+        println!("Routing: {} [#{}]", track_name, idx);
+        println!("  input:  {} / {}", in_type, in_ch);
+        println!("  output: {} / {}", out_type, out_ch);
+
+        let in_types = track.input_routing_types()?;
+        let out_types = track.output_routing_types()?;
+        println!("  available inputs:  {}", in_types.join(", "));
+        println!("  available outputs: {}", out_types.join(", "));
+        return Ok(());
+    }
+
+    if let Some(in_type) = input {
+        track.set_input_routing_type(in_type)?;
+        eprintln!("input → {}", in_type);
+    }
+    if let Some(in_ch) = input_channel {
+        track.set_input_routing_channel(in_ch)?;
+        eprintln!("input channel → {}", in_ch);
+    }
+    if let Some(out_type) = output {
+        track.set_output_routing_type(out_type)?;
+        eprintln!("output → {}", out_type);
+    }
+    if let Some(out_ch) = output_channel {
+        track.set_output_routing_channel(out_ch)?;
+        eprintln!("output channel → {}", out_ch);
+    }
+
     Ok(())
 }
 

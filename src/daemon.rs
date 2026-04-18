@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::events::EventBroadcaster;
+use crate::history::{self, History, HistoryTarget, StateCapture};
 use crate::json::MrNote;
 use crate::state::{SessionState, StateEvent};
 
@@ -434,6 +435,8 @@ struct SharedState {
     /// Cached param names: (track_idx, device_idx, param_idx) → name.
     param_name_cache: Mutex<HashMap<(i32, i32, i32), String>>,
     batcher: Batcher,
+    /// Session history (version control). None if no active session.
+    history: Mutex<Option<History>>,
 }
 
 fn refresh_track_cache(state: &SharedState) -> Result<()> {
@@ -462,6 +465,81 @@ fn resolve_track(state: &SharedState, name: &str) -> Result<i32> {
         .get(&key)
         .copied()
         .ok_or_else(|| Error::TrackNotFound(name.to_string()))
+}
+
+// ─── History recording ──────────────────────────────────────────────────────
+
+/// Lazily load the active session's history if not already loaded.
+fn ensure_history(state: &SharedState) {
+    let mut guard = state.history.lock().unwrap();
+    if guard.is_some() {
+        return;
+    }
+    if let Some(session_id) = history::active_session_id() {
+        match History::load(&session_id) {
+            Ok(mut h) => {
+                // Register this AI session
+                if let Some(ai_id) = history::detect_ai_session() {
+                    let _ = h.register_ai_session(history::AiSession {
+                        provider: history::detect_ai_provider().to_string(),
+                        session_id: ai_id,
+                        joined: String::new(), // will be set by register
+                    });
+                }
+                *guard = Some(h);
+            }
+            Err(e) => {
+                eprintln!("history: failed to load: {}", e);
+            }
+        }
+    }
+}
+
+/// Record a history entry (before/after state capture).
+fn record_history(
+    state: &SharedState,
+    cmd: &str,
+    args: &str,
+    target: HistoryTarget,
+    before: StateCapture,
+    after: StateCapture,
+) {
+    ensure_history(state);
+    let mut guard = state.history.lock().unwrap();
+    if let Some(ref mut history) = *guard {
+        if let Err(e) = history.append(cmd, args, target, before, after) {
+            eprintln!("history: append failed: {}", e);
+        }
+    }
+}
+
+/// Capture clip state from the session state cache.
+fn capture_clip(state: &SharedState, track_idx: i32, slot: i32) -> StateCapture {
+    let s = state.state.lock().unwrap();
+    if let Some(track) = s.tracks.get(track_idx as usize) {
+        if let Some(clip) = track.clips.get(&slot) {
+            return StateCapture::Clip {
+                notes: clip.notes.clone(),
+                length: clip.length,
+            };
+        }
+    }
+    StateCapture::Empty
+}
+
+/// Capture mix state from the session state cache.
+fn capture_mix(state: &SharedState, track_idx: i32) -> StateCapture {
+    let s = state.state.lock().unwrap();
+    if let Some(track) = s.tracks.get(track_idx as usize) {
+        StateCapture::Mix {
+            volume: track.volume,
+            pan: track.pan,
+            mute: track.mute,
+            solo: track.solo,
+        }
+    } else {
+        StateCapture::Empty
+    }
 }
 
 // ─── State polling (detect GUI changes) ─────────────────────────────────────
@@ -546,9 +624,12 @@ fn handle_request(state: &Arc<SharedState>, req: &DaemonRequest) -> DaemonRespon
         "track_delete" => handle_track_delete(state, req),
         "effect_load" => handle_effect_load(state, req),
         "scene_fire" => handle_scene_fire(state, req),
+        "clip_fire" => handle_clip_fire(state, req),
         "walk" => handle_walk(state, req),
         "walk_stop" => handle_walk_stop(state, req),
         "walk_stop_all" => handle_walk_stop_all(state),
+        "history_label" => handle_history_label(state, req),
+        "history_checkpoint" => handle_history_checkpoint(state, req),
         "shutdown" => DaemonResponse::ok("shutting down"),
         _ => DaemonResponse::err(format!("unknown command: {}", req.cmd)),
     };
@@ -557,10 +638,14 @@ fn handle_request(state: &Arc<SharedState>, req: &DaemonRequest) -> DaemonRespon
 }
 
 fn handle_proxy_query(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
+    let default_secs: u64 = std::env::var("MR_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2);
     let timeout = req
         .timeout_ms
         .map(Duration::from_millis)
-        .unwrap_or(Duration::from_secs(2));
+        .unwrap_or(Duration::from_secs(default_secs));
 
     // Immediate priority bypasses the batcher
     if req.priority == "immediate" {
@@ -585,10 +670,14 @@ fn handle_proxy_query(state: &SharedState, req: &DaemonRequest) -> DaemonRespons
 }
 
 fn handle_batch_query(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
+    let default_secs: u64 = std::env::var("MR_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2);
     let timeout = req
         .timeout_ms
         .map(Duration::from_millis)
-        .unwrap_or(Duration::from_secs(2));
+        .unwrap_or(Duration::from_secs(default_secs));
     let queries: Vec<(String, Vec<Arg>)> = req
         .queries
         .iter()
@@ -621,8 +710,17 @@ fn handle_proxy_send(state: &SharedState, req: &DaemonRequest) -> DaemonResponse
             // Intercept known mutations and emit events
             if req.address == "/live/song/set/tempo" {
                 if let Some(tempo) = req.osc_args.first().and_then(|a| a.as_f64()) {
+                    let old_tempo = state.state.lock().unwrap().tempo;
                     state.state.lock().unwrap().apply_tempo(tempo);
                     state.broadcaster.broadcast(&StateEvent::TempoChanged { tempo });
+                    record_history(
+                        state,
+                        "tempo",
+                        &format!("{:.1}", tempo),
+                        HistoryTarget { track: None, track_idx: None, slot: None },
+                        StateCapture::Tempo { value: old_tempo },
+                        StateCapture::Tempo { value: tempo },
+                    );
                 }
             } else if req.address == "/live/song/start_playing" {
                 state.state.lock().unwrap().playing = true;
@@ -642,6 +740,9 @@ fn handle_write(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
         Ok(i) => i,
         Err(e) => return DaemonResponse::err(e.to_string()),
     };
+
+    // Capture before-state from cache for history
+    let before_state = capture_clip(state, track_idx, req.slot);
 
     let track = state.session.track(track_idx);
     let new_hash = hash_notes(&req.notes);
@@ -671,13 +772,8 @@ fn handle_write(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
             if let Err(e) = clip.clear_notes() {
                 return DaemonResponse::err(format!("clear_notes: {}", e));
             }
-            let ableton_notes: Vec<ableton::Note> = req
-                .notes
-                .iter()
-                .map(|n| {
-                    ableton::Note::new(n.pitch, n.start as f32, n.duration as f32, n.velocity)
-                })
-                .collect();
+            let ableton_notes: Vec<ableton::Note> =
+                req.notes.iter().map(|n| n.to_ableton()).collect();
             for chunk in ableton_notes.chunks(80) {
                 if let Err(e) = clip.add_notes(chunk) {
                     return DaemonResponse::err(format!("add_notes: {}", e));
@@ -699,13 +795,8 @@ fn handle_write(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
                 let _ = clip.set_name(&req.name);
             }
             let _ = clip.set_looping(true);
-            let ableton_notes: Vec<ableton::Note> = req
-                .notes
-                .iter()
-                .map(|n| {
-                    ableton::Note::new(n.pitch, n.start as f32, n.duration as f32, n.velocity)
-                })
-                .collect();
+            let ableton_notes: Vec<ableton::Note> =
+                req.notes.iter().map(|n| n.to_ableton()).collect();
             for chunk in ableton_notes.chunks(80) {
                 if let Err(e) = clip.add_notes(chunk) {
                     return DaemonResponse::err(format!("add_notes: {}", e));
@@ -743,6 +834,23 @@ fn handle_write(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
                 notes: req.notes.clone(),
                 length: req.length,
             });
+
+            // Record history
+            record_history(
+                state,
+                "write",
+                &format!("{}:{}", req.track, req.slot),
+                HistoryTarget {
+                    track: Some(req.track.clone()),
+                    track_idx: Some(track_idx),
+                    slot: Some(req.slot),
+                },
+                before_state,
+                StateCapture::Clip {
+                    notes: req.notes.clone(),
+                    length: req.length,
+                },
+            );
 
             DaemonResponse::ok_with_kind(
                 format!(
@@ -807,6 +915,24 @@ fn handle_automate(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
         points: req.points.clone(),
     });
 
+    // Record history
+    record_history(
+        state,
+        "automate",
+        &format!("{}:{} {}", req.track, req.slot, req.param),
+        HistoryTarget {
+            track: Some(req.track.clone()),
+            track_idx: Some(track_idx),
+            slot: Some(req.slot),
+        },
+        StateCapture::Empty, // automation not cached
+        StateCapture::Automation {
+            device: req.device,
+            param: req.param.clone(),
+            points: req.points.clone(),
+        },
+    );
+
     DaemonResponse::ok_with_kind(
         format!(
             "automated {} on {}:{} ({} points)",
@@ -826,6 +952,10 @@ fn handle_mix(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
         Ok(i) => i,
         Err(e) => return DaemonResponse::err(e.to_string()),
     };
+
+    // Capture before-state for history
+    let before_mix = capture_mix(state, track_idx);
+
     let track = state.session.track(track_idx);
     let mut changes = Vec::new();
 
@@ -892,6 +1022,21 @@ fn handle_mix(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
         solo: solo_val,
     });
 
+    // Record history
+    let after_mix = capture_mix(state, track_idx);
+    record_history(
+        state,
+        "mix",
+        &format!("{} {}", req.track, changes.join(" ")),
+        HistoryTarget {
+            track: Some(req.track.clone()),
+            track_idx: Some(track_idx),
+            slot: None,
+        },
+        before_mix,
+        after_mix,
+    );
+
     DaemonResponse::ok(format!("mix {} → {}", req.track, changes.join(" ")))
 }
 
@@ -927,6 +1072,32 @@ fn handle_send_level(state: &SharedState, req: &DaemonRequest) -> DaemonResponse
         return_idx,
         level: req.level,
     });
+
+    // Record history (capture send level before if available)
+    let before_send = {
+        let s = state.state.lock().unwrap();
+        if let Some(track) = s.tracks.get(track_idx as usize) {
+            if let Some(&level) = track.sends.get(return_idx as usize) {
+                StateCapture::Send { return_idx, level }
+            } else {
+                StateCapture::Empty
+            }
+        } else {
+            StateCapture::Empty
+        }
+    };
+    record_history(
+        state,
+        "send",
+        &format!("{} → {} {:.2}", req.track, req.return_name, req.level),
+        HistoryTarget {
+            track: Some(req.track.clone()),
+            track_idx: Some(track_idx),
+            slot: None,
+        },
+        before_send,
+        StateCapture::Send { return_idx, level: req.level },
+    );
 
     DaemonResponse::ok(format!(
         "send {} → {} level:{:.2}",
@@ -983,6 +1154,28 @@ fn handle_device_param(state: &SharedState, req: &DaemonRequest) -> DaemonRespon
         });
 
         changes.push(format!("{}:{:.3}", param_names[param_idx], value));
+    }
+
+    // Record history for each param change
+    for kv in &req.params_kv {
+        let key = &kv[0];
+        let value: f64 = kv[1].parse().unwrap_or(0.0);
+        record_history(
+            state,
+            "device",
+            &format!("{} {}:{:.3}", req.track, key, value),
+            HistoryTarget {
+                track: Some(req.track.clone()),
+                track_idx: Some(track_idx),
+                slot: None,
+            },
+            StateCapture::Empty, // param before-state not cached
+            StateCapture::Param {
+                device: req.device,
+                param: key.clone(),
+                value,
+            },
+        );
     }
 
     DaemonResponse::ok(format!("device {} → {}", req.track, changes.join(" ")))
@@ -1044,6 +1237,20 @@ fn handle_track_create(state: &SharedState, req: &DaemonRequest) -> DaemonRespon
         name: req.name.clone(),
     });
 
+    // Record history
+    record_history(
+        state,
+        "track_create",
+        &req.name,
+        HistoryTarget {
+            track: Some(req.name.clone()),
+            track_idx: Some(track_idx),
+            slot: None,
+        },
+        StateCapture::Empty,
+        StateCapture::Empty,
+    );
+
     let label = if !req.instrument.is_empty() {
         format!("track \"{}\" [#{}] ← {}", req.name, track_idx, req.instrument)
     } else if !req.simpler.is_empty() {
@@ -1062,6 +1269,20 @@ fn handle_track_delete(state: &SharedState, req: &DaemonRequest) -> DaemonRespon
     if let Err(e) = state.session.delete_track(track_idx) {
         return DaemonResponse::err(format!("delete_track: {e}"));
     }
+    // Record history (capture full track state as before)
+    record_history(
+        state,
+        "track_delete",
+        &req.track,
+        HistoryTarget {
+            track: Some(req.track.clone()),
+            track_idx: Some(track_idx),
+            slot: None,
+        },
+        capture_mix(state, track_idx),
+        StateCapture::Empty,
+    );
+
     let _ = refresh_track_cache(state);
     state.broadcaster.broadcast(&StateEvent::TrackDeleted { index: track_idx });
     DaemonResponse::ok(format!("deleted track \"{}\"", req.track))
@@ -1081,7 +1302,37 @@ fn handle_effect_load(state: &SharedState, req: &DaemonRequest) -> DaemonRespons
         track_idx,
         effect: req.name.clone(),
     });
+    // Record history
+    record_history(
+        state,
+        "effect",
+        &format!("{} ← {}", req.track, req.name),
+        HistoryTarget {
+            track: Some(req.track.clone()),
+            track_idx: Some(track_idx),
+            slot: None,
+        },
+        StateCapture::Empty,
+        StateCapture::Empty,
+    );
+
     DaemonResponse::ok(format!("effect \"{}\" → {}", req.name, req.track))
+}
+
+fn handle_clip_fire(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
+    let track_name = &req.track;
+    let slot = req.slot;
+    let track_idx = {
+        let st = state.state.lock().unwrap();
+        match st.tracks.iter().position(|t| t.name == *track_name) {
+            Some(i) => i as i32,
+            None => return DaemonResponse::err(format!("track \"{}\" not found", track_name)),
+        }
+    };
+    if let Err(e) = state.session.fire_clip(track_idx, slot) {
+        return DaemonResponse::err(format!("fire_clip: {e}"));
+    }
+    DaemonResponse::ok(format!("fired {}:{}", track_name, slot))
 }
 
 fn handle_scene_fire(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
@@ -1101,6 +1352,44 @@ fn handle_scene_fire(state: &SharedState, req: &DaemonRequest) -> DaemonResponse
             state.broadcaster.broadcast(&StateEvent::TransportChanged { playing: true });
             DaemonResponse::ok("▶ playing")
         }
+    }
+}
+
+// ─── History commands ───────────────────────────────────────────────────────
+
+fn handle_history_label(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
+    ensure_history(state);
+    let mut guard = state.history.lock().unwrap();
+    match guard.as_mut() {
+        Some(history) => match history.label_current(&req.name) {
+            Ok(seq) => DaemonResponse::ok(format!("labeled @{} \"{}\"", seq, req.name)),
+            Err(e) => DaemonResponse::err(e.to_string()),
+        },
+        None => DaemonResponse::err("no active session"),
+    }
+}
+
+fn handle_history_checkpoint(state: &SharedState, req: &DaemonRequest) -> DaemonResponse {
+    ensure_history(state);
+    let session_state = state.state.lock().unwrap().clone();
+    let guard = state.history.lock().unwrap();
+    match guard.as_ref() {
+        Some(history) => {
+            let label = if req.name.is_empty() {
+                None
+            } else {
+                Some(req.name.as_str())
+            };
+            match history.checkpoint(&session_state, label) {
+                Ok(()) => DaemonResponse::ok(format!(
+                    "checkpoint @{} saved{}",
+                    history.current_seq(),
+                    label.map(|l| format!(" [{}]", l)).unwrap_or_default()
+                )),
+                Err(e) => DaemonResponse::err(e.to_string()),
+            }
+        }
+        None => DaemonResponse::err("no active session"),
     }
 }
 
@@ -1619,6 +1908,7 @@ pub fn run_daemon() -> Result<()> {
         listeners_ready: AtomicBool::new(false),
         param_name_cache: Mutex::new(HashMap::new()),
         batcher: Batcher::new(),
+        history: Mutex::new(None), // lazily loaded on first mutation
     });
 
     // Start listener immediately so the parent process sees us as running
@@ -1859,16 +2149,20 @@ mod tests {
     #[test]
     fn test_hash_notes_deterministic() {
         let notes = vec![
-            MrNote { pitch: 60, start: 0.0, duration: 1.0, velocity: 100 },
-            MrNote { pitch: 64, start: 1.0, duration: 1.0, velocity: 80 },
+            MrNote { pitch: 60, start: 0.0, duration: 1.0, velocity: 100,
+                ..Default::default() },
+            MrNote { pitch: 64, start: 1.0, duration: 1.0, velocity: 80,
+                ..Default::default() },
         ];
         assert_eq!(hash_notes(&notes), hash_notes(&notes));
     }
 
     #[test]
     fn test_hash_notes_different() {
-        let notes1 = vec![MrNote { pitch: 60, start: 0.0, duration: 1.0, velocity: 100 }];
-        let notes2 = vec![MrNote { pitch: 61, start: 0.0, duration: 1.0, velocity: 100 }];
+        let notes1 = vec![MrNote { pitch: 60, start: 0.0, duration: 1.0, velocity: 100,
+                ..Default::default() }];
+        let notes2 = vec![MrNote { pitch: 61, start: 0.0, duration: 1.0, velocity: 100,
+                ..Default::default() }];
         assert_ne!(hash_notes(&notes1), hash_notes(&notes2));
     }
 
@@ -1885,7 +2179,8 @@ mod tests {
             slot: 0,
             length: 16.0,
             name: "Melody".into(),
-            notes: vec![MrNote { pitch: 60, start: 0.0, duration: 1.0, velocity: 100 }],
+            notes: vec![MrNote { pitch: 60, start: 0.0, duration: 1.0, velocity: 100,
+                ..Default::default() }],
             ..Default::default()
         };
         let json = serde_json::to_string(&req).unwrap();
@@ -1919,5 +2214,123 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("120.0"));
         assert!(json.contains("result"));
+    }
+
+    #[test]
+    fn test_daemon_response_ok() {
+        let resp = DaemonResponse::ok("success");
+        assert!(resp.ok);
+        assert_eq!(resp.message.unwrap(), "success");
+        assert!(resp.error.is_none());
+    }
+
+    #[test]
+    fn test_daemon_response_err() {
+        let resp = DaemonResponse::err("something broke");
+        assert!(!resp.ok);
+        assert_eq!(resp.error.unwrap(), "something broke");
+        assert!(resp.message.is_none());
+    }
+
+    #[test]
+    fn test_daemon_response_ok_with_result_roundtrip() {
+        let resp = DaemonResponse::ok_with_result(vec![
+            Arg::Float(120.0),
+            Arg::Int(4),
+            Arg::String("test".into()),
+        ]);
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: DaemonResponse = serde_json::from_str(&json).unwrap();
+        assert!(parsed.ok);
+        let result = parsed.result.unwrap();
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_daemon_response_skip_none_fields() {
+        let resp = DaemonResponse::ok("done");
+        let json = serde_json::to_string(&resp).unwrap();
+        // None fields should be skipped
+        assert!(!json.contains("error"));
+        assert!(!json.contains("result"));
+        assert!(!json.contains("update_kind"));
+    }
+
+    #[test]
+    fn test_daemon_request_all_cmd_types() {
+        // Test that all known command types serialize/deserialize
+        for cmd in &["write", "automate", "query", "send", "mix", "create", 
+                     "delete", "fire", "stop_all", "status", "subscribe",
+                     "tempo", "effect", "params", "batch_query"] {
+            let req = DaemonRequest {
+                cmd: cmd.to_string(),
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&req).unwrap();
+            let parsed: DaemonRequest = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.cmd, *cmd);
+        }
+    }
+
+    #[test]
+    fn test_daemon_request_with_mix_fields() {
+        let req = DaemonRequest {
+            cmd: "mix".into(),
+            track: "bass".into(),
+            volume: Some(0.7),
+            pan: Some(-0.2),
+            mute: Some(false),
+            solo: Some(true),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: DaemonRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.volume.unwrap(), 0.7);
+        assert_eq!(parsed.pan.unwrap(), -0.2);
+        assert!(!parsed.mute.unwrap());
+        assert!(parsed.solo.unwrap());
+    }
+
+    #[test]
+    fn test_daemon_request_batch_query() {
+        let req = DaemonRequest {
+            cmd: "batch_query".into(),
+            queries: vec![
+                BatchQueryEntry { address: "/live/song/get/tempo".into(), args: vec![] },
+                BatchQueryEntry { address: "/live/track/get/volume".into(), args: vec![Arg::Int(0)] },
+            ],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: DaemonRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.queries.len(), 2);
+        assert_eq!(parsed.queries[0].address, "/live/song/get/tempo");
+        assert_eq!(parsed.queries[1].args.len(), 1);
+    }
+
+    #[test]
+    fn test_daemon_request_pipelining_fields() {
+        let req = DaemonRequest {
+            cmd: "query".into(),
+            request_id: 42,
+            priority: "high".into(),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: DaemonRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.request_id, 42);
+        assert_eq!(parsed.priority, "high");
+    }
+
+    #[test]
+    fn test_daemon_response_with_batch_results() {
+        let resp = DaemonResponse::ok_with_results(vec![
+            vec![Arg::Float(120.0)],
+            vec![Arg::Float(0.85)],
+        ]);
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: DaemonResponse = serde_json::from_str(&json).unwrap();
+        let results = parsed.results.unwrap();
+        assert_eq!(results.len(), 2);
     }
 }

@@ -77,6 +77,36 @@ pub fn mix(
     Ok(())
 }
 
+/// Explicitly set mute state (not toggle)
+pub fn set_mute(track_name: &str, muted: bool) -> Result<()> {
+    if daemon::is_running() {
+        let req = DaemonRequest {
+            cmd: "mix".into(),
+            track: track_name.to_string(),
+            mute: Some(muted),
+            ..Default::default()
+        };
+        let resp = daemon::send_request(&req)?;
+        if !resp.ok {
+            eprintln!("error: {}", resp.error.unwrap_or_default());
+            return Ok(());
+        }
+    } else {
+        let session = connect::connect()?;
+        let idx = connect::resolve_track(&session, track_name)?;
+        let track = session.track(idx);
+        track.set_mute(muted)?;
+    }
+
+    if muted {
+        eprintln!("muted {track_name}");
+    } else {
+        eprintln!("unmuted {track_name}");
+    }
+
+    Ok(())
+}
+
 pub fn send(track_name: &str, return_name: &str, level: f32) -> Result<()> {
     // Route through daemon if running
     if daemon::is_running() {

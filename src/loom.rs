@@ -488,3 +488,150 @@ pub fn export() -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&state.weave)?);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_loom_state_roundtrip() {
+        let state = LoomState {
+            weave: Weave {
+                duration_bars: 64,
+                arc: vec![],
+                strands: vec![],
+                crossings: vec![],
+            },
+            started_at: 0,
+            duration_seconds: 1200.0,
+        };
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        let parsed: LoomState = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.weave.duration_bars, 64);
+        assert_eq!(parsed.duration_seconds, 1200.0);
+    }
+
+    #[test]
+    fn test_loom_state_position_not_started() {
+        let state = LoomState {
+            weave: Weave { duration_bars: 64, arc: vec![], strands: vec![], crossings: vec![] },
+            started_at: 0,
+            duration_seconds: 600.0,
+        };
+        assert_eq!(state.position(), 0.0);
+    }
+
+    #[test]
+    fn test_loom_state_position_zero_duration() {
+        let state = LoomState {
+            weave: Weave { duration_bars: 64, arc: vec![], strands: vec![], crossings: vec![] },
+            started_at: 1000,
+            duration_seconds: 0.0,
+        };
+        assert_eq!(state.position(), 0.0);
+    }
+
+    #[test]
+    fn test_parse_trajectory_constant() {
+        let t = parse_trajectory("constant:0.5").unwrap();
+        match t {
+            Trajectory::Constant { value } => assert!((value - 0.5).abs() < 1e-10),
+            _ => panic!("expected Constant"),
+        }
+    }
+
+    #[test]
+    fn test_parse_trajectory_ramp() {
+        let t = parse_trajectory("ramp:0.2,0.8").unwrap();
+        match t {
+            Trajectory::Ramp { from, to } => {
+                assert!((from - 0.2).abs() < 1e-10);
+                assert!((to - 0.8).abs() < 1e-10);
+            }
+            _ => panic!("expected Ramp"),
+        }
+    }
+
+    #[test]
+    fn test_parse_trajectory_drunk() {
+        let t = parse_trajectory("drunk:0.3,0.7,0.05").unwrap();
+        match t {
+            Trajectory::Drunk { range, step, .. } => {
+                assert!((range.0 - 0.3).abs() < 1e-10);
+                assert!((range.1 - 0.7).abs() < 1e-10);
+                assert!((step - 0.05).abs() < 1e-10);
+            }
+            _ => panic!("expected Drunk"),
+        }
+    }
+
+    #[test]
+    fn test_parse_trajectory_sine() {
+        let t = parse_trajectory("sine:0.1,0.9,3").unwrap();
+        match t {
+            Trajectory::Sine { range, cycles } => {
+                assert!((range.0 - 0.1).abs() < 1e-10);
+                assert!((cycles - 3.0).abs() < 1e-10);
+            }
+            _ => panic!("expected Sine"),
+        }
+    }
+
+    #[test]
+    fn test_parse_trajectory_follow() {
+        let t = parse_trajectory("follow:pad,filter_freq,0.1").unwrap();
+        match t {
+            Trajectory::Follow { strand, param, lag } => {
+                assert_eq!(strand, "pad");
+                assert_eq!(param, "filter_freq");
+                assert!((lag - 0.1).abs() < 1e-10);
+            }
+            _ => panic!("expected Follow"),
+        }
+    }
+
+    #[test]
+    fn test_parse_trajectory_bad_kind() {
+        assert!(parse_trajectory("nonexistent:1.0").is_err());
+    }
+
+    #[test]
+    fn test_parse_trajectory_bad_format() {
+        assert!(parse_trajectory("just_a_word").is_err());
+    }
+
+    #[test]
+    fn test_parse_trajectory_missing_args() {
+        assert!(parse_trajectory("ramp:0.2").is_err());
+        assert!(parse_trajectory("drunk:0.2,0.5").is_err());
+        assert!(parse_trajectory("sine:0.2,0.8").is_err());
+        assert!(parse_trajectory("follow:pad,freq").is_err());
+    }
+
+    #[test]
+    fn test_loom_state_with_strands() {
+        let state = LoomState {
+            weave: Weave {
+                duration_bars: 32,
+                arc: vec![Movement {
+                    name: "rise".into(),
+                    span: (0.0, 0.5),
+                    energy: Trajectory::Ramp { from: 0.2, to: 0.8 },
+                }],
+                strands: vec![Strand {
+                    name: "pad".into(),
+                    envelope: Envelope { enter: 0.0, attack: 0.1, sustain: 0.6, release: 0.2 },
+                    trajectories: std::collections::HashMap::new(),
+                }],
+                crossings: vec![],
+            },
+            started_at: 0,
+            duration_seconds: 600.0,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let parsed: LoomState = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.weave.strands.len(), 1);
+        assert_eq!(parsed.weave.strands[0].name, "pad");
+        assert_eq!(parsed.weave.arc.len(), 1);
+    }
+}

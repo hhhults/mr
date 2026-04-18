@@ -42,8 +42,14 @@ pub fn inspect_track(name: &str) -> Result<()> {
     let vol = track.get_volume()?;
     let pan = track.get_panning()?;
 
+    let in_type = track.get_input_routing_type().unwrap_or_default();
+    let in_ch = track.get_input_routing_channel().unwrap_or_default();
+    let out_type = track.get_output_routing_type().unwrap_or_default();
+    let out_ch = track.get_output_routing_channel().unwrap_or_default();
+
     println!("Track: {} [#{}]", name, idx);
     println!("  vol: {:.2}  pan: {:.2}", vol, pan);
+    println!("  in:  {} / {}  →  out: {} / {}", in_type, in_ch, out_type, out_ch);
 
     // Devices
     let device_names = track.device_names()?;
@@ -327,6 +333,7 @@ pub fn read(target: &str) -> Result<()> {
             start: n.start as f64,
             duration: n.duration as f64,
             velocity: n.velocity,
+                ..Default::default()
         })
         .collect();
 

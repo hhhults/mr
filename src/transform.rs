@@ -90,6 +90,42 @@ pub fn stretch(factor: f64) -> Result<()> {
     })
 }
 
+pub fn probability(p: f64) -> Result<()> {
+    pipe(|notes| {
+        notes
+            .into_iter()
+            .map(|mut n| {
+                n.probability = p.clamp(0.0, 1.0);
+                n
+            })
+            .collect()
+    })
+}
+
+pub fn deviation(amount: f64) -> Result<()> {
+    pipe(|notes| {
+        notes
+            .into_iter()
+            .map(|mut n| {
+                n.velocity_deviation = amount.clamp(-127.0, 127.0);
+                n
+            })
+            .collect()
+    })
+}
+
+pub fn release(velocity: f64) -> Result<()> {
+    pipe(|notes| {
+        notes
+            .into_iter()
+            .map(|mut n| {
+                n.release_velocity = velocity.clamp(0.0, 127.0);
+                n
+            })
+            .collect()
+    })
+}
+
 pub fn degrade(probability: f64, seed: u64) -> Result<()> {
     pipe(|notes| {
         let mut rng = SmallRng::seed_from_u64(seed);
@@ -232,6 +268,7 @@ pub fn repeat(times: usize) -> Result<()> {
                     start: n.start + offset,
                     duration: n.duration,
                     velocity: n.velocity,
+                ..Default::default()
                 });
             }
         }
@@ -347,6 +384,7 @@ pub fn morph(second_json: &str, amount: f64, seed: u64) -> Result<()> {
                 start: key.0 as f64 * grid,
                 duration: dur,
                 velocity: vel.clamp(1, 127),
+                ..Default::default()
             });
         }
     }
@@ -411,6 +449,7 @@ mod tests {
                 start,
                 duration: dur,
                 velocity: 100,
+                ..Default::default()
             })
             .collect()
     }
@@ -542,6 +581,7 @@ mod tests {
                     start: n.start + offset,
                     duration: n.duration,
                     velocity: n.velocity,
+                ..Default::default()
                 });
             }
         }
@@ -859,5 +899,173 @@ mod tests {
             .collect();
         assert_eq!(result[0].pitch, 72);
         assert_eq!(result[1].pitch, 76);
+    }
+
+    #[test]
+    fn test_humanize_bounds() {
+        let notes = make_notes(&[
+            (60, 1.0, 1.0), (64, 2.0, 1.0), (67, 3.0, 1.0), (72, 4.0, 1.0),
+        ]);
+        let timing = 0.1;
+        let velocity_range = 10.0;
+        let mut rng = SmallRng::seed_from_u64(42);
+        let result: Vec<MrNote> = notes
+            .into_iter()
+            .map(|mut n| {
+                n.start += rng.random::<f64>() * timing * 2.0 - timing;
+                if n.start < 0.0 { n.start = 0.0; }
+                let vel_offset = (rng.random::<f64>() * velocity_range * 2.0 - velocity_range) as i32;
+                n.velocity = (n.velocity + vel_offset).clamp(1, 127);
+                n
+            })
+            .collect();
+        for n in &result {
+            assert!(n.start >= 0.0, "humanize made start negative");
+            assert!(n.velocity >= 1 && n.velocity <= 127, "velocity out of range");
+        }
+    }
+
+    #[test]
+    fn test_humanize_zero_amount_unchanged() {
+        let notes = make_notes(&[(60, 1.0, 1.0), (64, 2.0, 1.0)]);
+        let timing = 0.0;
+        let velocity_range = 0.0;
+        let mut rng = SmallRng::seed_from_u64(42);
+        let result: Vec<MrNote> = notes
+            .clone()
+            .into_iter()
+            .map(|mut n| {
+                n.start += rng.random::<f64>() * timing * 2.0 - timing;
+                if n.start < 0.0 { n.start = 0.0; }
+                let vel_offset = (rng.random::<f64>() * velocity_range * 2.0 - velocity_range) as i32;
+                n.velocity = (n.velocity + vel_offset).clamp(1, 127);
+                n
+            })
+            .collect();
+        for (orig, res) in notes.iter().zip(result.iter()) {
+            assert!((orig.start - res.start).abs() < 1e-10);
+            assert_eq!(orig.velocity, res.velocity);
+        }
+    }
+
+    #[test]
+    fn test_swing_offsets_odd_notes() {
+        let mut notes = make_notes(&[
+            (60, 0.0, 0.5), (62, 0.5, 0.5), (64, 1.0, 0.5), (65, 1.5, 0.5),
+        ]);
+        let amount = 0.1;
+        notes.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+        for (i, note) in notes.iter_mut().enumerate() {
+            if i % 2 == 1 {
+                note.start += amount;
+            }
+        }
+        // Even notes unchanged
+        assert!((notes[0].start - 0.0).abs() < 1e-10);
+        assert!((notes[2].start - 1.0).abs() < 1e-10);
+        // Odd notes shifted
+        assert!((notes[1].start - 0.6).abs() < 1e-10);
+        assert!((notes[3].start - 1.6).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_swing_zero_amount_unchanged() {
+        let mut notes = make_notes(&[(60, 0.0, 0.5), (62, 0.5, 0.5)]);
+        let original_starts: Vec<f64> = notes.iter().map(|n| n.start).collect();
+        let amount = 0.0;
+        notes.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+        for (i, note) in notes.iter_mut().enumerate() {
+            if i % 2 == 1 { note.start += amount; }
+        }
+        for (i, n) in notes.iter().enumerate() {
+            assert!((n.start - original_starts[i]).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_velocities_pattern_cyclic() {
+        let notes = make_notes(&[
+            (60, 0.0, 1.0), (62, 1.0, 1.0), (64, 2.0, 1.0),
+            (65, 3.0, 1.0), (67, 4.0, 1.0),
+        ]);
+        let vels = vec![100i32, 60, 80];
+        let result: Vec<i32> = notes
+            .iter()
+            .enumerate()
+            .map(|(i, _)| vels[i % vels.len()].clamp(1, 127))
+            .collect();
+        assert_eq!(result, vec![100, 60, 80, 100, 60]);
+    }
+
+    #[test]
+    fn test_velocities_empty_pattern_noop() {
+        let notes = make_notes(&[(60, 0.0, 1.0), (62, 1.0, 1.0)]);
+        let vels: Vec<i32> = vec![];
+        // Empty velocity pattern should leave notes unchanged
+        let result: Vec<MrNote> = if vels.is_empty() {
+            notes.clone()
+        } else {
+            notes.into_iter().enumerate().map(|(i, mut n)| {
+                n.velocity = vels[i % vels.len()].clamp(1, 127);
+                n
+            }).collect()
+        };
+        assert_eq!(result[0].velocity, 100);
+        assert_eq!(result[1].velocity, 100);
+    }
+
+    #[test]
+    fn test_concat_logic() {
+        let mut notes_a = make_notes(&[(60, 0.0, 1.0), (64, 1.0, 1.0)]);
+        let notes_b = make_notes(&[(67, 0.0, 1.0), (72, 1.0, 1.0)]);
+        let offset = notes_a.iter()
+            .map(|n| n.start + n.duration)
+            .fold(0.0f64, f64::max);
+        assert!((offset - 2.0).abs() < 1e-10);
+        for mut n in notes_b {
+            n.start += offset;
+            notes_a.push(n);
+        }
+        assert_eq!(notes_a.len(), 4);
+        assert!((notes_a[2].start - 2.0).abs() < 1e-10);
+        assert!((notes_a[3].start - 3.0).abs() < 1e-10);
+        assert_eq!(notes_a[2].pitch, 67);
+    }
+
+    #[test]
+    fn test_concat_empty_first() {
+        let notes_a: Vec<MrNote> = vec![];
+        let notes_b = make_notes(&[(67, 0.0, 1.0)]);
+        let offset = notes_a.iter()
+            .map(|n| n.start + n.duration)
+            .fold(0.0f64, f64::max);
+        assert!((offset - 0.0).abs() < 1e-10);
+        let mut result = notes_a;
+        for mut n in notes_b {
+            n.start += offset;
+            result.push(n);
+        }
+        assert_eq!(result.len(), 1);
+        assert!((result[0].start - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_stack_logic() {
+        let mut notes_a = make_notes(&[(60, 0.0, 1.0), (64, 1.0, 1.0)]);
+        let notes_b = make_notes(&[(67, 0.0, 1.0), (72, 1.0, 1.0)]);
+        notes_a.extend(notes_b);
+        assert_eq!(notes_a.len(), 4);
+        // Second pattern overlaps in time (no offset)
+        assert!((notes_a[2].start - 0.0).abs() < 1e-10);
+        assert!((notes_a[3].start - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_stack_empty_second() {
+        let notes_a = make_notes(&[(60, 0.0, 1.0)]);
+        let notes_b: Vec<MrNote> = vec![];
+        let mut result = notes_a.clone();
+        result.extend(notes_b);
+        assert_eq!(result.len(), 1);
     }
 }

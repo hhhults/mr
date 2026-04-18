@@ -82,6 +82,7 @@ fn pattern_to_mr_notes(pattern: &Pattern, default_duration: f64, velocity: i32) 
                 start: e.start,
                 duration: dur,
                 velocity,
+                ..Default::default()
             }
         })
         .filter(|n| (0..=127).contains(&n.pitch))
@@ -165,9 +166,9 @@ mod tests {
     #[test]
     fn test_mr_notes_roundtrip() {
         let notes = vec![
-            MrNote { pitch: 60, start: 0.0, duration: 1.0, velocity: 100 },
-            MrNote { pitch: 64, start: 1.0, duration: 1.0, velocity: 100 },
-            MrNote { pitch: 67, start: 2.0, duration: 1.0, velocity: 100 },
+            MrNote { pitch: 60, start: 0.0, duration: 1.0, velocity: 100, ..Default::default() },
+            MrNote { pitch: 64, start: 1.0, duration: 1.0, velocity: 100, ..Default::default() },
+            MrNote { pitch: 67, start: 2.0, duration: 1.0, velocity: 100, ..Default::default() },
         ];
         let pattern = mr_notes_to_pattern(&notes);
         let back = pattern_to_mr_notes(&pattern, 0.0, 100);
@@ -197,6 +198,62 @@ mod tests {
     #[test]
     fn test_parse_transforms_bad_name() {
         let result = parse_transforms("nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_transforms_all_types() {
+        // Verify each transform type parses and produces output
+        let seed = Pattern::Seq(vec![
+            Pattern::Atom(60.0, 0.25),
+            Pattern::Atom(64.0, 0.25),
+            Pattern::Atom(67.0, 0.25),
+        ]);
+        for spec in &["rotate:2", "transpose:7", "invert:60", "retrograde", "stretch:2", "thin:2", "degrade:0.3"] {
+            let transforms = parse_transforms(spec).unwrap();
+            assert_eq!(transforms.len(), 1, "failed to parse: {}", spec);
+            let result = transforms[0](&seed);
+            // Should not panic
+            let _ = result.events();
+        }
+    }
+
+    #[test]
+    fn test_parse_transforms_empty() {
+        let transforms = parse_transforms("").unwrap();
+        assert_eq!(transforms.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_transforms_default_args() {
+        // Without explicit arg, defaults should be used
+        let transforms = parse_transforms("rotate,transpose,stretch,thin,degrade").unwrap();
+        assert_eq!(transforms.len(), 5);
+    }
+
+    #[test]
+    fn test_mr_notes_to_pattern_empty() {
+        let notes: Vec<MrNote> = vec![];
+        let pattern = mr_notes_to_pattern(&notes);
+        assert!(pattern.events().is_empty());
+    }
+
+    #[test]
+    fn test_pattern_to_mr_notes_filters_out_of_range() {
+        // Pitches outside 0..127 should be filtered
+        let pattern = Pattern::Seq(vec![
+            Pattern::Atom(-5.0, 0.25),   // out of range
+            Pattern::Atom(60.0, 0.25),   // valid
+            Pattern::Atom(200.0, 0.25),  // out of range
+        ]);
+        let notes = pattern_to_mr_notes(&pattern, 1.0, 100);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].pitch, 60);
+    }
+
+    #[test]
+    fn test_parse_transforms_bad_arg() {
+        let result = parse_transforms("rotate:abc");
         assert!(result.is_err());
     }
 }

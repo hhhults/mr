@@ -13,6 +13,7 @@ mod generate;
 mod generative;
 mod genre;
 mod harmony;
+mod history;
 mod inspect;
 mod json;
 mod loom;
@@ -28,6 +29,7 @@ mod state;
 mod track;
 mod transform;
 mod viz;
+mod viz_preset;
 mod voice;
 mod walk;
 
@@ -77,6 +79,24 @@ enum Cmd {
     /// List all tracks
     Tracks,
 
+    // ── Routing ──────────────────────────────────────────────
+    /// Set track input/output routing
+    Route {
+        track: String,
+        /// Input source (e.g. "Ext. In", "No Input", track name, "Resampling")
+        #[arg(long, alias = "in")]
+        input: Option<String>,
+        /// Input channel (e.g. "1/2", "Pre FX", "Post FX", "Post Mixer")
+        #[arg(long, alias = "in-ch")]
+        input_channel: Option<String>,
+        /// Output destination (e.g. "Master", "Ext. Out", track name)
+        #[arg(long, alias = "out")]
+        output: Option<String>,
+        /// Output channel (e.g. "1/2", "Track In")
+        #[arg(long, alias = "out-ch")]
+        output_channel: Option<String>,
+    },
+
     // ── Mixing ───────────────────────────────────────────────
     /// Set track mix parameters
     Mix {
@@ -90,6 +110,10 @@ enum Cmd {
         #[arg(long)]
         solo: bool,
     },
+    /// Mute a track (explicit set, not toggle)
+    Mute { track: String },
+    /// Unmute a track (explicit set, not toggle)
+    Unmute { track: String },
     /// Set send level to a return track
     Send {
         track: String,
@@ -115,6 +139,71 @@ enum Cmd {
         pad: i32,
         /// Path to the sample file
         sample: String,
+    },
+
+    /// Load an empty Drum Rack onto a track
+    DrumRack {
+        track: String,
+    },
+
+    /// Hot-swap a device's preset in place (preserves device slot, sends, automation)
+    Swap {
+        track: String,
+        /// Device index on the track (default 0)
+        #[arg(long, default_value_t = 0)]
+        device: i32,
+        /// Preset or device name to load
+        preset: String,
+    },
+
+    /// List slices on a Simpler
+    Slices {
+        track: String,
+        /// MIDI note of a drum pad (if the Simpler is inside a Drum Rack pad)
+        #[arg(long)]
+        pad: Option<i32>,
+    },
+
+    /// Insert a slice at the given time (in audio samples)
+    SliceAdd {
+        track: String,
+        /// Time in samples
+        time: f32,
+        #[arg(long)]
+        pad: Option<i32>,
+    },
+
+    /// Clear all slices on a Simpler
+    SliceClear {
+        track: String,
+        #[arg(long)]
+        pad: Option<i32>,
+    },
+
+    /// Reset slices to default (re-detected onsets)
+    SliceReset {
+        track: String,
+        #[arg(long)]
+        pad: Option<i32>,
+    },
+
+    /// Set Simpler playback mode (classic / one-shot / slicing)
+    SimplerMode {
+        track: String,
+        #[arg(long)]
+        pad: Option<i32>,
+        /// "classic", "one-shot", or "slicing"
+        mode: String,
+    },
+
+    /// Load an instrument or effect into a drum rack pad's chain
+    PadLoad {
+        track: String,
+        /// MIDI note of the pad (e.g. 36 for kick)
+        #[arg(long)]
+        pad: i32,
+        /// Device name to load (e.g. "Operator", "Simpler", "Reverb")
+        device: String,
     },
 
     /// Set parameters on a drum pad's device
@@ -267,6 +356,12 @@ enum Cmd {
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
+    /// Set Live's per-note probability (0.0-1.0) — notes fire probabilistically at play time
+    Probability { p: f64 },
+    /// Set Live's velocity deviation (0.0-127.0) — per-note random velocity applied at play time
+    Deviation { amount: f64 },
+    /// Set per-note release velocity (0-127, default 64)
+    Release { velocity: f64 },
     /// Keep every Nth note
     Thin { n: usize },
     /// Add random timing/velocity variation
@@ -543,8 +638,82 @@ enum Cmd {
         #[arg(long)]
         name: Option<String>,
     },
-    /// Fire a scene (or just play)
+    /// Fire a scene (DEPRECATED: use clip-fire instead — scene fire stops tracks with empty slots)
+    #[command(hide = true)]
     Fire { idx: Option<i32> },
+    /// Fire a single clip on a track ("track:slot")
+    #[command(name = "clip-fire")]
+    ClipFire {
+        target: String,
+        /// Fire with legato behavior (continues phase of currently playing clip)
+        #[arg(long)]
+        legato: bool,
+        /// Override launch quantization: no-q, bar, 1/2, 1/4, 1/8, 1/16, 1/32
+        #[arg(long)]
+        q: Option<String>,
+    },
+
+    /// Capture currently playing clips into a new scene
+    CaptureScene,
+
+    /// Insert a single automation step on a clip parameter
+    EnvelopeStep {
+        /// track:slot
+        target: String,
+        #[arg(long, default_value_t = 0)]
+        device: i32,
+        /// Parameter name (case-insensitive, partial ok)
+        #[arg(long)]
+        param: String,
+        /// Step start time in beats
+        time: f64,
+        /// Step duration in beats
+        duration: f64,
+        /// Normalized value 0.0..1.0
+        value: f64,
+    },
+
+    /// Read the automation value at a specific time
+    EnvelopeValue {
+        /// track:slot
+        target: String,
+        #[arg(long, default_value_t = 0)]
+        device: i32,
+        #[arg(long)]
+        param: String,
+        /// Time in beats
+        time: f64,
+    },
+
+    /// Sample an envelope to stdout as a pipeable curve
+    EnvelopeRead {
+        /// track:slot
+        target: String,
+        #[arg(long, default_value_t = 0)]
+        device: i32,
+        #[arg(long)]
+        param: String,
+        /// Sample window length in beats
+        #[arg(long, default_value_t = 4.0)]
+        length: f64,
+        /// Sampling resolution in beats
+        #[arg(long, default_value_t = 0.25)]
+        resolution: f64,
+    },
+
+    /// Move a device from one track to another
+    MoveDevice {
+        #[arg(long)]
+        from: String,
+        /// Device index on source track
+        #[arg(long, default_value_t = 0)]
+        src_device: i32,
+        #[arg(long)]
+        to: String,
+        /// Insertion position on destination (default = end)
+        #[arg(long, default_value_t = -1)]
+        dest_pos: i32,
+    },
     /// Stop all clips
     StopAll,
 
@@ -560,6 +729,42 @@ enum Cmd {
     Loom {
         #[command(subcommand)]
         cmd: LoomCmd,
+    },
+
+    // ── Session History ────────────────────────────────────────
+    /// Manage session version control
+    Session {
+        #[command(subcommand)]
+        cmd: SessionCmd,
+    },
+    /// Show change history for the active session
+    History {
+        /// Filter by track or track:slot (e.g. "kick", "kick:0")
+        target: Option<String>,
+        /// Show changes since a time ago (e.g. "5m", "1h")
+        #[arg(long)]
+        since: Option<String>,
+        /// Only show labeled entries
+        #[arg(long)]
+        labeled: bool,
+    },
+    /// Restore a previous state
+    Restore {
+        /// Target to restore (e.g. "kick:0")
+        target: String,
+        /// Ref to restore to (@N, @-1, @5m, @"label")
+        #[arg(name = "ref")]
+        history_ref: String,
+    },
+    /// Save a full-state checkpoint
+    Checkpoint {
+        /// Optional label for the checkpoint
+        label: Option<String>,
+    },
+    /// Label the current point in history
+    Label {
+        /// Label text
+        text: String,
     },
 
     // ── Audio / FluCoMa ─────────────────────────────────────
@@ -955,6 +1160,18 @@ enum VizCmd {
         #[arg(long, default_value = "20")]
         rows: u32,
     },
+    /// Re-mosaic from the current rendered frame (feedback loop)
+    MosaicFeedback {
+        /// Corpus to draw tiles from
+        #[arg(long)]
+        corpus: String,
+        /// Grid columns
+        #[arg(long, default_value = "30")]
+        cols: u32,
+        /// Grid rows
+        #[arg(long, default_value = "20")]
+        rows: u32,
+    },
     /// Control FFlive datamosh parameters (OSC to ffglitch-livecoding)
     Datamosh {
         /// Master glitch intensity (0.0–1.0). Accepts signal spec.
@@ -999,6 +1216,36 @@ enum VizCmd {
         #[command(subcommand)]
         cmd: PipeCmd,
     },
+    /// Manage visual presets
+    Preset {
+        #[command(subcommand)]
+        cmd: PresetCmd,
+    },
+    /// Pick 2 random images from a corpus and start mosaic transport
+    RandomTransport {
+        /// Corpus name (directory under visual-corpus/)
+        corpus: String,
+        /// Grid columns
+        #[arg(long, default_value = "30")]
+        cols: u32,
+        /// Grid rows
+        #[arg(long, default_value = "20")]
+        rows: u32,
+    },
+    /// Pick a random image and show as textured triangle mosaic
+    RandomTriangle {
+        /// Corpus name (directory under visual-corpus/)
+        corpus: String,
+        /// Triangle density (number of points)
+        #[arg(long, default_value = "3000")]
+        density: usize,
+        /// Edge detection bias (0.0-1.0)
+        #[arg(long, default_value = "0.7")]
+        edge_bias: f64,
+        /// Frames to show before clearing (0 = persistent)
+        #[arg(long, default_value = "0")]
+        frames: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1013,6 +1260,17 @@ enum PipeCmd {
     Off,
     /// Show pipe status (frames written/dropped/skipped)
     Status,
+}
+
+#[derive(Subcommand)]
+enum PresetCmd {
+    /// Load a visual preset
+    Load {
+        /// Preset name (e.g. "forge/drip", "forge/peak")
+        name: String,
+    },
+    /// List available visual presets
+    List,
 }
 
 #[derive(Subcommand)]
@@ -1145,6 +1403,27 @@ enum LoomCmd {
     Export,
 }
 
+#[derive(Subcommand)]
+enum SessionCmd {
+    /// Start a new versioned session
+    Init {
+        /// Session name
+        name: String,
+        /// AI session ID (auto-detected if omitted)
+        #[arg(long)]
+        ai_session: Option<String>,
+        /// AI provider (auto-detected if omitted)
+        #[arg(long)]
+        ai_provider: Option<String>,
+    },
+    /// List all sessions
+    List,
+    /// Resume a previous session (fuzzy name match)
+    Resume { name: String },
+    /// End the active session
+    End,
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -1165,13 +1444,33 @@ fn main() {
         Cmd::Effect { track: t, name } => track::effect(&t, &name),
         Cmd::Tracks => track::list(),
 
+        // ── Routing ──
+        Cmd::Route { track: t, input, input_channel, output, output_channel } => {
+            track::route(&t, input.as_deref(), input_channel.as_deref(), output.as_deref(), output_channel.as_deref())
+        }
+
         // ── Mixing ──
-        Cmd::Mix { track: t, vol, pan, mute, solo } => mix::mix(&t, vol, pan, mute, solo),
+        Cmd::Mix { track: t, vol, pan, mute, solo } => {
+            if mute {
+                eprintln!("warning: `mr mix --mute` toggles — use `mr mute`/`mr unmute` instead for explicit state");
+            }
+            mix::mix(&t, vol, pan, mute, solo)
+        }
+        Cmd::Mute { track: t } => mix::set_mute(&t, true),
+        Cmd::Unmute { track: t } => mix::set_mute(&t, false),
         Cmd::Send { track: t, return_track, level } => mix::send(&t, &return_track, level),
 
         // ── Device ──
         Cmd::Device { track: t, device, params } => device::set_params(&t, device, &params),
         Cmd::PadSample { track: t, pad, sample } => track::pad_sample(&t, pad, &sample),
+        Cmd::DrumRack { track: t } => track::drum_rack(&t),
+        Cmd::Swap { track: t, device, preset } => track::swap(&t, device, &preset),
+        Cmd::Slices { track: t, pad } => track::slices(&t, pad),
+        Cmd::SliceAdd { track: t, time, pad } => track::slice_add(&t, pad, time),
+        Cmd::SliceClear { track: t, pad } => track::slice_clear(&t, pad),
+        Cmd::SliceReset { track: t, pad } => track::slice_reset(&t, pad),
+        Cmd::SimplerMode { track: t, pad, mode } => track::simpler_mode(&t, pad, &mode),
+        Cmd::PadLoad { track: t, pad, device } => track::pad_load(&t, pad, &device),
         Cmd::PadDevice { track: t, pad, device, params } => {
             device::set_pad_params(&t, pad, device, &params)
         }
@@ -1221,6 +1520,9 @@ fn main() {
         Cmd::Invert { axis } => transform::invert(axis),
         Cmd::Stretch { factor } => transform::stretch(factor),
         Cmd::Degrade { probability, seed } => transform::degrade(probability, seed),
+        Cmd::Probability { p } => transform::probability(p),
+        Cmd::Deviation { amount } => transform::deviation(amount),
+        Cmd::Release { velocity } => transform::release(velocity),
         Cmd::Thin { n } => transform::thin(n),
         Cmd::Humanize { timing, velocity, seed } => transform::humanize(timing, velocity, seed),
         Cmd::Swing { amount } => transform::swing(amount),
@@ -1362,6 +1664,9 @@ fn main() {
             VizCmd::Mosaic { path, corpus, cols, rows } => {
                 viz::mosaic(&path, &corpus, cols, rows)
             }
+            VizCmd::MosaicFeedback { corpus, cols, rows } => {
+                viz::mosaic_feedback(&corpus, cols, rows)
+            }
             VizCmd::Datamosh {
                 intensity, mv_scale, mv_rotate, mv_noise,
                 iframe_rate, dct_noise, dct_quantize, block_shift,
@@ -1387,6 +1692,16 @@ fn main() {
                 PipeCmd::Off => viz::pipe_disable(),
                 PipeCmd::Status => viz::pipe_status(),
             },
+            VizCmd::Preset { cmd } => match cmd {
+                PresetCmd::Load { name } => viz_preset::load(&name),
+                PresetCmd::List => viz_preset::list(),
+            },
+            VizCmd::RandomTransport { corpus, cols, rows } => {
+                viz::random_transport(&corpus, cols, rows)
+            }
+            VizCmd::RandomTriangle { corpus, density, edge_bias, frames } => {
+                viz::random_triangle(&corpus, density, edge_bias, frames)
+            }
         },
 
         // ── Daemon ──
@@ -1399,7 +1714,30 @@ fn main() {
 
         // ── Scenes ──
         Cmd::Scene { idx, name } => scene::scene(idx, name.as_deref()),
-        Cmd::Fire { idx } => scene::fire(idx),
+        Cmd::Fire { idx } => {
+            eprintln!("warning: `mr fire` is deprecated — use `mr clip-fire track:slot` instead (scene fire stops tracks with empty slots)");
+            scene::fire(idx)
+        }
+        Cmd::ClipFire { target, legato, q } => {
+            if legato || q.is_some() {
+                scene::fire_clip_ext(&target, legato, q.as_deref())
+            } else {
+                scene::fire_clip(&target)
+            }
+        }
+        Cmd::CaptureScene => scene::capture_scene(),
+        Cmd::EnvelopeStep { target, device, param, time, duration, value } => {
+            sink::envelope_step(&target, device, &param, time, duration, value)
+        }
+        Cmd::EnvelopeValue { target, device, param, time } => {
+            sink::envelope_value(&target, device, &param, time)
+        }
+        Cmd::EnvelopeRead { target, device, param, length, resolution } => {
+            sink::envelope_read(&target, device, &param, length, resolution)
+        }
+        Cmd::MoveDevice { from, src_device, to, dest_pos } => {
+            scene::move_device(&from, src_device, &to, dest_pos)
+        }
         Cmd::StopAll => scene::stop_all(),
 
         // ── Snapshots ──
@@ -1431,6 +1769,26 @@ fn main() {
             LoomCmd::End => loom::end(),
             LoomCmd::Export => loom::export(),
         },
+
+        // ── Session History ──
+        Cmd::Session { cmd } => match cmd {
+            SessionCmd::Init { name, ai_session, ai_provider } => {
+                history::session_init(&name, ai_session.as_deref(), ai_provider.as_deref())
+            }
+            SessionCmd::List => history::session_list(),
+            SessionCmd::Resume { name } => history::session_resume(&name),
+            SessionCmd::End => history::session_end(),
+        },
+        Cmd::History { target, since, labeled } => {
+            history::show_history(target.as_deref(), since.as_deref(), labeled)
+        }
+        Cmd::Restore { target, history_ref } => {
+            history::restore_state(&target, &history_ref)
+        }
+        Cmd::Checkpoint { label } => {
+            history::add_checkpoint(label.as_deref())
+        }
+        Cmd::Label { text } => history::add_label(&text),
 
         // ── Audio / FluCoMa ──
         Cmd::Slice { audio_file, method, threshold, out, min_length } => {

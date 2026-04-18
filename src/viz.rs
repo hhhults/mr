@@ -236,6 +236,19 @@ pub fn mosaic(path: &str, corpus: &str, cols: u32, rows: u32) -> Result<()> {
     Ok(())
 }
 
+pub fn mosaic_feedback(corpus: &str, cols: u32, rows: u32) -> Result<()> {
+    let json = serde_json::to_string(&serde_json::json!({
+        "cmd": "mosaic_feedback",
+        "corpus": corpus,
+        "cols": cols,
+        "rows": rows,
+    }))
+    .unwrap();
+    let resp = send_command(&json)?;
+    eprintln!("{resp}");
+    Ok(())
+}
+
 pub fn sync(enabled: &str) -> Result<()> {
     let on = matches!(enabled.to_lowercase().as_str(), "on" | "true" | "1" | "yes");
     let json = serde_json::to_string(&serde_json::json!({
@@ -272,4 +285,126 @@ pub fn pipe_status() -> Result<()> {
     let resp = send_command(&json)?;
     eprintln!("{resp}");
     Ok(())
+}
+
+// ─── Lerp ──────────────────────────────────────────────────────────────────
+
+/// Smoothly interpolate a parameter to a target value over duration seconds.
+pub fn set_lerp(name: &str, value: f64, duration: f64) -> Result<()> {
+    let json = serde_json::to_string(&serde_json::json!({
+        "cmd": "set_param_lerp",
+        "name": name,
+        "value": value,
+        "duration": duration,
+    }))
+    .unwrap();
+    let resp = send_command(&json)?;
+    eprintln!("viz lerp {name} → {value:.3} over {duration:.1}s — {resp}");
+    Ok(())
+}
+
+// ─── Triangle Stamp ────────────────────────────────────────────────────────
+
+/// Tessellate a target image into textured triangles, render for N frames.
+pub fn triangle_stamp(path: &str, density: usize, edge_bias: f64, frames: u32) -> Result<()> {
+    let json = serde_json::to_string(&serde_json::json!({
+        "cmd": "triangle_stamp",
+        "path": path,
+        "density": density,
+        "edge_bias": edge_bias,
+        "frames": frames,
+    }))
+    .unwrap();
+    let resp = send_command(&json)?;
+    eprintln!("{resp}");
+    Ok(())
+}
+
+/// Tessellate a target image into textured triangles (persistent).
+pub fn triangle_mosaic_textured(path: &str, density: usize, edge_bias: f64) -> Result<()> {
+    let json = serde_json::to_string(&serde_json::json!({
+        "cmd": "triangle_mosaic_textured",
+        "path": path,
+        "density": density,
+        "edge_bias": edge_bias,
+    }))
+    .unwrap();
+    let resp = send_command(&json)?;
+    eprintln!("{resp}");
+    Ok(())
+}
+
+// ─── Random Transport ──────────────────────────────────────────────────────
+
+fn pick_random_images(corpus_name: &str, n: usize) -> Result<Vec<PathBuf>> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let corpus_dir = PathBuf::from(&home)
+        .join("musictools")
+        .join("visual-corpus")
+        .join(corpus_name);
+
+    if !corpus_dir.exists() {
+        return Err(Error::Other(format!(
+            "corpus dir not found: {}",
+            corpus_dir.display()
+        )));
+    }
+
+    let images: Vec<PathBuf> = std::fs::read_dir(&corpus_dir)
+        .map_err(|e| Error::Other(format!("read dir: {e}")))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            matches!(
+                p.extension().and_then(|s| s.to_str()),
+                Some("jpg" | "jpeg" | "png")
+            )
+        })
+        .collect();
+
+    if images.len() < n {
+        return Err(Error::Other(format!(
+            "corpus '{}' has fewer than {} images",
+            corpus_name, n
+        )));
+    }
+
+    use rand::seq::IndexedRandom;
+    let mut rng = rand::rng();
+    Ok(images.choose_multiple(&mut rng, n).cloned().collect())
+}
+
+/// Pick 2 random images from a corpus directory and start mosaic transport.
+pub fn random_transport(corpus_name: &str, cols: u32, rows: u32) -> Result<()> {
+    let chosen = pick_random_images(corpus_name, 2)?;
+
+    eprintln!(
+        "random-transport: {} → {}",
+        chosen[0].file_name().unwrap().to_string_lossy(),
+        chosen[1].file_name().unwrap().to_string_lossy()
+    );
+
+    mosaic_transport(
+        &chosen[0].to_string_lossy(),
+        &chosen[1].to_string_lossy(),
+        corpus_name,
+        cols,
+        rows,
+    )
+}
+
+/// Pick a random image and show it as a textured triangle mosaic.
+pub fn random_triangle(corpus_name: &str, density: usize, edge_bias: f64, frames: u32) -> Result<()> {
+    let chosen = pick_random_images(corpus_name, 1)?;
+
+    eprintln!(
+        "random-triangle: {}",
+        chosen[0].file_name().unwrap().to_string_lossy()
+    );
+
+    if frames > 0 {
+        triangle_stamp(&chosen[0].to_string_lossy(), density, edge_bias, frames)
+    } else {
+        triangle_mosaic_textured(&chosen[0].to_string_lossy(), density, edge_bias)
+    }
 }

@@ -192,4 +192,84 @@ mod tests {
         assert!(!is_triad_type("maj7"));
         assert!(!is_triad_type("dom7"));
     }
+
+    #[test]
+    fn test_parse_chord_arg_all_roots() {
+        for (name, expected) in &[
+            ("C", 0), ("D", 2), ("E", 4), ("F", 5), ("G", 7), ("A", 9), ("B", 11),
+        ] {
+            let (root, _) = parse_chord_arg(name).unwrap();
+            assert_eq!(root, *expected, "failed for {}", name);
+        }
+    }
+
+    #[test]
+    fn test_parse_chord_arg_accidentals() {
+        let (root, _) = parse_chord_arg("C#").unwrap();
+        assert_eq!(root, 1);
+        let (root, _) = parse_chord_arg("Db").unwrap();
+        assert_eq!(root, 1);
+        let (root, _) = parse_chord_arg("F##").unwrap(); // double sharp
+        assert_eq!(root, 7); // F## = G
+    }
+
+    #[test]
+    fn test_parse_chord_arg_bad() {
+        assert!(parse_chord_arg("").is_err());
+        assert!(parse_chord_arg("X").is_err());
+        assert!(parse_chord_arg("Cxyz").is_err());
+    }
+
+    #[test]
+    fn test_voice_leading_graph_neighbors() {
+        let g = VoiceLeadingGraph::new(true, 2);
+        let c_major = g.find(0, "major").expect("C major should exist");
+        let nbrs = g.neighbors(c_major, Some(2));
+        assert!(!nbrs.is_empty(), "C major should have neighbors");
+        // All neighbors should be within distance 2
+        for (_, d) in &nbrs {
+            assert!(*d <= 2);
+        }
+    }
+
+    #[test]
+    fn test_voice_leading_graph_path() {
+        let g = VoiceLeadingGraph::new(true, 2);
+        let c_major = g.find(0, "major").unwrap();
+        let a_minor = g.find(9, "minor").unwrap();
+        let path = g.shortest_path(c_major, a_minor);
+        assert!(path.is_some(), "should find path from C to Am");
+        let path = path.unwrap();
+        assert!(path.len() >= 2, "path should have at least start and end");
+        assert_eq!(path.first().unwrap().root, 0);
+        assert_eq!(path.last().unwrap().root, 9);
+    }
+
+    #[test]
+    fn test_voice_leading_graph_walk() {
+        let g = VoiceLeadingGraph::new(true, 2);
+        let c_major = g.find(0, "major").unwrap();
+        let walked = g.random_walk(c_major, 5, 2, false, 42);
+        // random_walk returns steps + start chord
+        assert!(walked.len() >= 5, "walk should return at least 5 chords, got {}", walked.len());
+    }
+
+    #[test]
+    fn test_voice_leading_graph_orbit() {
+        let g = VoiceLeadingGraph::new(true, 2);
+        let c_major = g.find(0, "major").unwrap();
+        let orbit = g.orbit(c_major, &['P', 'L', 'R'], 20);
+        assert!(!orbit.is_empty());
+        // Orbit should eventually return to start (or hit max_iter)
+        assert!(orbit.len() <= 20);
+    }
+
+    #[test]
+    fn test_chord_to_mr_format() {
+        let g = VoiceLeadingGraph::new(true, 2);
+        let c_major = g.find(0, "major").unwrap();
+        let mr = chord_to_mr(c_major);
+        assert_eq!(mr.quality, "major");
+        assert_eq!(mr.root_midi, 60);
+    }
 }

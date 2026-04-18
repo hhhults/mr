@@ -29,7 +29,8 @@ fn step(n: usize) -> f64 {
 }
 
 fn hit(pitch: i32, s: usize, vel: i32) -> MrNote {
-    MrNote { pitch, start: step(s), duration: 0.25, velocity: vel }
+    MrNote { pitch, start: step(s), duration: 0.25, velocity: vel ,
+                ..Default::default()}
 }
 
 fn hits(pitch: i32, steps: &[usize], vel: i32) -> Vec<MrNote> {
@@ -440,8 +441,128 @@ pub fn rhythm(name: &str, pitch: i32, velocity: i32, duration: f64) -> Result<()
             start: (s - 1) as f64 * duration,
             duration,
             velocity,
+            ..Default::default()
         })
         .collect();
 
     write_stdout(&MrData::Pattern { notes })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_genre_by_name() {
+        assert!(find_genre("chicago-house").is_ok());
+        assert!(find_genre("detroit-techno").is_ok());
+        assert!(find_genre("minimal-techno").is_ok());
+    }
+
+    #[test]
+    fn test_find_genre_by_alias() {
+        assert!(find_genre("house").is_ok());
+        assert!(find_genre("techno").is_ok());
+    }
+
+    #[test]
+    fn test_find_genre_unknown() {
+        assert!(find_genre("nonexistent_genre").is_err());
+    }
+
+    #[test]
+    fn test_all_genres_produce_notes() {
+        for g in GENRES {
+            let notes = (g.build)();
+            assert!(!notes.is_empty(), "genre {} produced no notes", g.name);
+            for n in &notes {
+                assert!(n.pitch >= 0 && n.pitch <= 127, "bad pitch {} in {}", n.pitch, g.name);
+                assert!(n.start >= 0.0, "negative start in {}", g.name);
+                assert!(n.velocity >= 1 && n.velocity <= 127, "bad velocity in {}", g.name);
+            }
+        }
+    }
+
+    #[test]
+    fn test_genre_bpm_ranges_valid() {
+        for g in GENRES {
+            assert!(g.bpm_range.0 <= g.bpm_sweet, "{} min > sweet", g.name);
+            assert!(g.bpm_sweet <= g.bpm_range.1, "{} sweet > max", g.name);
+            assert!(g.bpm_range.0 > 0.0, "{} bpm_min should be > 0", g.name);
+        }
+    }
+
+    #[test]
+    fn test_genre_swing_range() {
+        for g in GENRES {
+            assert!(g.swing >= 0.0 && g.swing <= 1.0,
+                "genre {} swing {} out of [0,1]", g.name, g.swing);
+        }
+    }
+
+    #[test]
+    fn test_rhythm_known_names_produce_steps() {
+        let known = vec![
+            ("four-on-the-floor", 4), ("backbeat", 2), ("offbeat", 4),
+            ("8ths", 8), ("16ths", 16), ("dembow", 4), ("2step", 2),
+            ("halftime", 2), ("breakbeat", 4), ("stutter", 11),
+            ("clave-32", 5), ("clave-23", 5),
+        ];
+        for (name, expected_len) in &known {
+            let steps: Vec<usize> = match *name {
+                "four-on-the-floor" | "4otf" | "4x4" => vec![1, 5, 9, 13],
+                "backbeat" => vec![5, 13],
+                "offbeat-8th" | "offbeat" => vec![3, 7, 11, 15],
+                "8th-notes" | "8ths" => vec![1, 3, 5, 7, 9, 11, 13, 15],
+                "16th-notes" | "16ths" => (1..=16).collect(),
+                "dembow" | "tresillo" => vec![4, 7, 12, 15],
+                "2step" | "skippy" => vec![1, 11],
+                "halftime" => vec![1, 9],
+                "breakbeat" | "break" => vec![1, 7, 9, 15],
+                "stutter" | "jersey" => vec![1, 2, 4, 5, 7, 8, 10, 11, 13, 14, 16],
+                "clave-32" | "son-clave" => vec![1, 4, 7, 11, 13],
+                "clave-23" => vec![1, 3, 7, 9, 13],
+                _ => panic!("unmatched: {}", name),
+            };
+            assert_eq!(steps.len(), *expected_len, "wrong count for {}", name);
+        }
+    }
+
+    #[test]
+    fn test_genre_family() {
+        assert_eq!(genre_family("chicago-house"), "four-on-the-floor");
+        assert_eq!(genre_family("electro"), "broken kick");
+        assert_eq!(genre_family("jungle"), "double-time breaks");
+        assert_eq!(genre_family("dubstep"), "half-time");
+        assert_eq!(genre_family("nonexistent"), "");
+    }
+
+    #[test]
+    fn test_step_and_hit_helpers() {
+        assert_eq!(step(1), 0.0);
+        assert_eq!(step(5), 1.0);
+        assert_eq!(step(16), 3.75);
+
+        let n = hit(KICK, 1, 100);
+        assert_eq!(n.pitch, KICK);
+        assert!((n.start - 0.0).abs() < 1e-10);
+        assert_eq!(n.velocity, 100);
+    }
+
+    #[test]
+    fn test_hits_helper() {
+        let notes = hits(SNARE, &[5, 13], 90);
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].pitch, SNARE);
+        assert!((notes[0].start - 1.0).abs() < 1e-10); // step(5) = 1.0
+        assert!((notes[1].start - 3.0).abs() < 1e-10); // step(13) = 3.0
+    }
+
+    #[test]
+    fn test_shaker_16_alternating_velocity() {
+        let notes = shaker_16(80, 50);
+        assert_eq!(notes.len(), 16);
+        assert_eq!(notes[0].velocity, 80); // step 1 = odd
+        assert_eq!(notes[1].velocity, 50); // step 2 = even
+    }
 }

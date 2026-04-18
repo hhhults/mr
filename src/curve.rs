@@ -207,4 +207,74 @@ mod tests {
         assert!((first - 0.2f64).abs() < 0.001);
         assert!((last - 0.9f64).abs() < 0.001);
     }
+
+    #[test]
+    fn test_stochastic_range() {
+        let (vmin, vmax) = (0.2, 0.8);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let num_points = 100usize;
+        let density = 3usize;
+        let mut raw: Vec<f64> = Vec::new();
+        for _ in 0..num_points {
+            let mut sum = 0.0;
+            for _ in 0..density {
+                sum += rng.random::<f64>();
+            }
+            raw.push(sum / density as f64);
+        }
+        let points: Vec<f64> = raw.iter().map(|&v| vmin + v * (vmax - vmin)).collect();
+        for &v in &points {
+            assert!(v >= vmin - 0.001 && v <= vmax + 0.001,
+                "stochastic value {} out of range [{}, {}]", v, vmin, vmax);
+        }
+    }
+
+    #[test]
+    fn test_stochastic_smoothing() {
+        let mut rng = SmallRng::seed_from_u64(99);
+        let num_points = 50usize;
+        let density = 1usize;
+        let smoothing = 5usize;
+        let mut raw: Vec<f64> = Vec::new();
+        for _ in 0..num_points {
+            let mut sum = 0.0;
+            for _ in 0..density { sum += rng.random::<f64>(); }
+            raw.push(sum / density as f64);
+        }
+        // Apply smoothing
+        let mut smoothed = Vec::new();
+        for i in 0..raw.len() {
+            let start = i.saturating_sub(smoothing / 2);
+            let end = (i + smoothing / 2 + 1).min(raw.len());
+            let avg: f64 = raw[start..end].iter().sum::<f64>() / (end - start) as f64;
+            smoothed.push(avg);
+        }
+        // Smoothed values should have less variance
+        let raw_var = variance(&raw);
+        let smooth_var = variance(&smoothed);
+        assert!(smooth_var <= raw_var, "smoothing should reduce variance");
+    }
+
+    #[test]
+    fn test_stochastic_density_affects_distribution() {
+        // Higher density → values cluster toward 0.5 (central limit theorem)
+        let mut rng_low = SmallRng::seed_from_u64(42);
+        let mut rng_high = SmallRng::seed_from_u64(42);
+        let n = 200;
+
+        let low_density: Vec<f64> = (0..n).map(|_| rng_low.random::<f64>()).collect();
+        let high_density: Vec<f64> = (0..n).map(|_| {
+            let sum: f64 = (0..10).map(|_| rng_high.random::<f64>()).sum();
+            sum / 10.0
+        }).collect();
+
+        let low_var = variance(&low_density);
+        let high_var = variance(&high_density);
+        assert!(high_var < low_var, "higher density should reduce variance");
+    }
+
+    fn variance(data: &[f64]) -> f64 {
+        let mean = data.iter().sum::<f64>() / data.len() as f64;
+        data.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / data.len() as f64
+    }
 }

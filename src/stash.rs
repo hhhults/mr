@@ -67,4 +67,63 @@ mod tests {
         assert!(path.to_string_lossy().contains("melody.json"));
         assert!(path.to_string_lossy().contains(".mr/stash"));
     }
+
+    #[test]
+    fn test_stash_dir_location() {
+        let dir = stash_dir();
+        assert!(dir.to_string_lossy().contains(".mr/stash"));
+    }
+
+    #[test]
+    fn test_stash_file_roundtrip() {
+        use crate::json::{MrData, MrNote};
+
+        let dir = std::env::temp_dir().join("mr_test_stash");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test_melody.json");
+
+        let data = MrData::Pattern {
+            notes: vec![
+                MrNote { pitch: 60, start: 0.0, duration: 1.0, velocity: 100 },
+                MrNote { pitch: 64, start: 1.0, duration: 1.0, velocity: 80 },
+            ],
+        };
+
+        let json = serde_json::to_string_pretty(&data).unwrap();
+        std::fs::write(&path, &json).unwrap();
+
+        let loaded_json = std::fs::read_to_string(&path).unwrap();
+        let loaded: MrData = serde_json::from_str(&loaded_json).unwrap();
+        assert_eq!(loaded.type_name(), "pattern");
+        let notes = loaded.into_pattern("test").unwrap();
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].pitch, 60);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_stash_curve_roundtrip() {
+        use crate::json::MrData;
+
+        let dir = std::env::temp_dir().join("mr_test_stash_curve");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test_filter.json");
+
+        let data = MrData::Curve {
+            points: vec![[0.0, 0.2], [4.0, 0.8], [8.0, 0.5]],
+        };
+
+        let json = serde_json::to_string(&data).unwrap();
+        std::fs::write(&path, &json).unwrap();
+
+        let loaded: MrData = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let points = loaded.into_curve("test").unwrap();
+        assert_eq!(points.len(), 3);
+        assert!((points[1][1] - 0.8).abs() < 1e-10);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

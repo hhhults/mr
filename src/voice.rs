@@ -30,6 +30,7 @@ fn voice_progression(
                 start: t,
                 duration,
                 velocity: 100,
+                ..Default::default()
             });
         }
         t += duration;
@@ -181,6 +182,7 @@ pub fn led(range: [i32; 2]) -> Result<()> {
                 start: t,
                 duration: 4.0,
                 velocity: 100,
+                ..Default::default()
             });
         }
         prev_voiced = Some(voiced);
@@ -250,5 +252,75 @@ mod tests {
         assert_eq!(quality_to_intervals("maj7"), vec![0, 4, 7, 11]);
         assert_eq!(quality_to_intervals("minor"), vec![0, 3, 7]);
         assert_eq!(quality_to_intervals("dom7"), vec![0, 4, 7, 10]);
+    }
+
+    #[test]
+    fn test_quality_to_intervals_all_types() {
+        // Verify all named qualities return non-empty intervals starting with 0
+        let qualities = vec![
+            "major", "minor", "augmented", "diminished", "sus2", "sus4", "power5",
+            "maj7", "dom7", "min7", "minmaj7", "hdim7", "dim7", "augmaj7", "augdom7",
+            "maj6", "min6", "maj9", "min9", "dom9", "maj11", "min11", "dom11",
+            "maj13", "min13", "dom13", "add9", "add11", "7#9", "7b9", "7#11",
+        ];
+        for q in &qualities {
+            let intervals = quality_to_intervals(q);
+            assert!(!intervals.is_empty(), "empty intervals for {}", q);
+            assert_eq!(intervals[0], 0, "first interval should be 0 for {}", q);
+            // All intervals should be ascending
+            for w in intervals.windows(2) {
+                assert!(w[1] > w[0], "intervals not ascending for {}: {:?}", q, intervals);
+            }
+        }
+    }
+
+    #[test]
+    fn test_quality_unknown_defaults_to_major() {
+        let intervals = quality_to_intervals("nonexistent");
+        assert_eq!(intervals, vec![0, 4, 7]); // default major triad
+    }
+
+    #[test]
+    fn test_place_in_range_shifts_octaves() {
+        // Very high pitches should be brought down
+        let pitches = vec![96, 100, 103]; // C7 E7 G7
+        let placed = place_in_range(&pitches, 48, 72);
+        for &p in &placed {
+            assert!(p >= 48 && p <= 72, "pitch {} not in [48, 72]", p);
+        }
+    }
+
+    #[test]
+    fn test_place_in_range_very_low() {
+        let pitches = vec![24, 28, 31]; // C1 E1 G1
+        let placed = place_in_range(&pitches, 48, 72);
+        for &p in &placed {
+            assert!(p >= 48 && p <= 72, "pitch {} not in [48, 72]", p);
+        }
+    }
+
+    #[test]
+    fn test_voice_lead_to_minimal_movement() {
+        let prev = vec![60, 64, 67]; // C E G
+        // Target: F A C (same pitch classes shifted up a fourth)
+        let target = vec![65, 69, 72];
+        let voiced = voice_lead_to(&target, &prev, 48, 84);
+        // Total movement should be small
+        let total_movement: i32 = voiced.iter().zip(prev.iter())
+            .map(|(v, p)| (v - p).abs())
+            .sum();
+        assert!(total_movement <= 15, "total movement {} too large", total_movement);
+    }
+
+    #[test]
+    fn test_voice_lead_to_different_sizes() {
+        // Target has more notes than previous — should still work
+        let prev = vec![60, 64, 67];
+        let target = vec![60, 64, 67, 72];
+        let voiced = voice_lead_to(&target, &prev, 48, 84);
+        assert_eq!(voiced.len(), 4);
+        for &v in &voiced {
+            assert!(v >= 48 && v <= 84);
+        }
     }
 }

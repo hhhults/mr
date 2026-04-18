@@ -247,6 +247,7 @@ mod tests {
                 start: 0.0,
                 duration: 1.0,
                 velocity: 100,
+                ..Default::default()
             }],
             length: 16.0,
         };
@@ -288,9 +289,144 @@ mod tests {
             start: 0.0,
             duration: 1.0,
             velocity: 100,
+                ..Default::default()
         }];
         state.apply_clip_write(0, 0, notes, 16.0, "Melody");
         assert!(state.tracks[0].clips.contains_key(&0));
         assert_eq!(state.tracks[0].clips[&0].notes.len(), 1);
+    }
+
+    fn make_state() -> SessionState {
+        SessionState {
+            tempo: 120.0,
+            playing: false,
+            tracks: vec![
+                TrackState {
+                    name: "pad".into(),
+                    index: 0,
+                    volume: 0.85,
+                    pan: 0.0,
+                    mute: false,
+                    solo: false,
+                    devices: vec![],
+                    clips: HashMap::new(),
+                    sends: vec![],
+                },
+                TrackState {
+                    name: "bass".into(),
+                    index: 1,
+                    volume: 0.7,
+                    pan: -0.1,
+                    mute: false,
+                    solo: false,
+                    devices: vec![],
+                    clips: HashMap::new(),
+                    sends: vec![],
+                },
+            ],
+            returns: vec![ReturnState {
+                name: "Reverb".into(),
+                index: 0,
+                volume: 0.8,
+                pan: 0.0,
+            }],
+        }
+    }
+
+    #[test]
+    fn test_apply_tempo() {
+        let mut state = make_state();
+        assert_eq!(state.tempo, 120.0);
+        state.apply_tempo(140.0);
+        assert_eq!(state.tempo, 140.0);
+    }
+
+    #[test]
+    fn test_apply_mix_volume() {
+        let mut state = make_state();
+        state.apply_mix(0, Some(0.5), None, None, None);
+        assert!((state.tracks[0].volume - 0.5).abs() < 1e-10);
+        // Other fields unchanged
+        assert!((state.tracks[0].pan - 0.0).abs() < 1e-10);
+        assert!(!state.tracks[0].mute);
+    }
+
+    #[test]
+    fn test_apply_mix_all_fields() {
+        let mut state = make_state();
+        state.apply_mix(1, Some(0.9), Some(0.3), Some(true), Some(true));
+        assert!((state.tracks[1].volume - 0.9).abs() < 1e-10);
+        assert!((state.tracks[1].pan - 0.3).abs() < 1e-10);
+        assert!(state.tracks[1].mute);
+        assert!(state.tracks[1].solo);
+    }
+
+    #[test]
+    fn test_apply_mix_out_of_range_track() {
+        let mut state = make_state();
+        // Should not panic on invalid track index
+        state.apply_mix(99, Some(0.5), None, None, None);
+        // Tracks unchanged
+        assert!((state.tracks[0].volume - 0.85).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_apply_clip_write_out_of_range() {
+        let mut state = make_state();
+        // Should not panic
+        state.apply_clip_write(99, 0, vec![], 4.0, "Ghost");
+        assert!(state.tracks[0].clips.is_empty());
+    }
+
+    #[test]
+    fn test_apply_clip_write_overwrites() {
+        let mut state = make_state();
+        let notes1 = vec![MrNote { pitch: 60, start: 0.0, duration: 1.0, velocity: 100, ..Default::default() }];
+        let notes2 = vec![
+            MrNote { pitch: 64, start: 0.0, duration: 1.0, velocity: 80, ..Default::default() },
+            MrNote { pitch: 67, start: 1.0, duration: 1.0, velocity: 80, ..Default::default() },
+        ];
+        state.apply_clip_write(0, 0, notes1, 4.0, "V1");
+        assert_eq!(state.tracks[0].clips[&0].notes.len(), 1);
+        state.apply_clip_write(0, 0, notes2, 8.0, "V2");
+        assert_eq!(state.tracks[0].clips[&0].notes.len(), 2);
+        assert_eq!(state.tracks[0].clips[&0].name, "V2");
+    }
+
+    #[test]
+    fn test_state_event_all_variants_serde() {
+        let events: Vec<StateEvent> = vec![
+            StateEvent::TempoChanged { tempo: 130.0 },
+            StateEvent::TransportChanged { playing: true },
+            StateEvent::TrackCreated { index: 0, name: "kick".into() },
+            StateEvent::TrackDeleted { index: 0 },
+            StateEvent::ClipAutomated {
+                track: "pad".into(), track_idx: 0, slot: 0,
+                param: "Filter Freq".into(), device: 0,
+                points: vec![[0.0, 0.5], [4.0, 0.8]],
+            },
+            StateEvent::ParamChanged {
+                track: "pad".into(), track_idx: 0, device: 0,
+                param: "Volume".into(), value: 0.7,
+            },
+            StateEvent::MixChanged {
+                track: "pad".into(), track_idx: 0,
+                volume: Some(0.8), pan: None, mute: None, solo: None,
+            },
+            StateEvent::SendChanged {
+                track: "pad".into(), track_idx: 0, return_idx: 0, level: 0.5,
+            },
+            StateEvent::EffectLoaded {
+                track: "pad".into(), track_idx: 0, effect: "Reverb".into(),
+            },
+            StateEvent::SceneFired { index: 2 },
+        ];
+        for event in &events {
+            let json = serde_json::to_string(event).unwrap();
+            let parsed: StateEvent = serde_json::from_str(&json).unwrap();
+            // Roundtrip should produce valid JSON
+            let json2 = serde_json::to_string(&parsed).unwrap();
+            assert_eq!(json, json2);
+        }
     }
 }

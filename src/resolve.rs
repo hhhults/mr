@@ -222,4 +222,83 @@ mod tests {
         assert_eq!(pitch_name(69), "A4");
         assert_eq!(pitch_name(61), "C#4");
     }
+
+    #[test]
+    fn test_parse_chord_quality_triads() {
+        assert_eq!(parse_chord_quality("maj").unwrap(), construct::MAJOR_TRIAD);
+        assert_eq!(parse_chord_quality("major").unwrap(), construct::MAJOR_TRIAD);
+        assert_eq!(parse_chord_quality("min").unwrap(), construct::MINOR_TRIAD);
+        assert_eq!(parse_chord_quality("minor").unwrap(), construct::MINOR_TRIAD);
+        assert_eq!(parse_chord_quality("m").unwrap(), construct::MINOR_TRIAD);
+        assert_eq!(parse_chord_quality("dim").unwrap(), construct::DIM);
+        assert_eq!(parse_chord_quality("aug").unwrap(), construct::AUG);
+        assert_eq!(parse_chord_quality("sus2").unwrap(), construct::SUS2);
+        assert_eq!(parse_chord_quality("sus4").unwrap(), construct::SUS4);
+        assert_eq!(parse_chord_quality("5").unwrap(), construct::POWER5);
+    }
+
+    #[test]
+    fn test_parse_chord_quality_sevenths() {
+        assert_eq!(parse_chord_quality("maj7").unwrap(), construct::MAJOR_7);
+        assert_eq!(parse_chord_quality("m7").unwrap(), construct::MINOR_7);
+        assert_eq!(parse_chord_quality("dom7").unwrap(), construct::DOM_7);
+        assert_eq!(parse_chord_quality("7").unwrap(), construct::DOM_7);
+    }
+
+    #[test]
+    fn test_parse_chord_quality_extended() {
+        assert_eq!(parse_chord_quality("maj9").unwrap(), construct::MAJ9);
+        assert_eq!(parse_chord_quality("min9").unwrap(), construct::MIN9);
+        assert_eq!(parse_chord_quality("dom9").unwrap(), construct::DOM9);
+        assert_eq!(parse_chord_quality("9").unwrap(), construct::DOM9);
+        assert_eq!(parse_chord_quality("maj11").unwrap(), construct::MAJ11);
+        assert_eq!(parse_chord_quality("11").unwrap(), construct::DOM11);
+        assert_eq!(parse_chord_quality("maj13").unwrap(), construct::MAJ13);
+        assert_eq!(parse_chord_quality("13").unwrap(), construct::DOM13);
+    }
+
+    #[test]
+    fn test_parse_chord_quality_altered() {
+        assert_eq!(parse_chord_quality("7#9").unwrap(), construct::DOM7_SHARP9);
+        assert_eq!(parse_chord_quality("7b9").unwrap(), construct::DOM7_FLAT9);
+        assert_eq!(parse_chord_quality("7#11").unwrap(), construct::DOM7_SHARP11);
+    }
+
+    #[test]
+    fn test_parse_chord_quality_invalid() {
+        assert!(parse_chord_quality("xyz").is_err());
+        assert!(parse_chord_quality("").is_err());
+    }
+
+    #[test]
+    fn test_parse_chord_quality_case_insensitive() {
+        assert_eq!(parse_chord_quality("MAJ").unwrap(), construct::MAJOR_TRIAD);
+        assert_eq!(parse_chord_quality("Min7").unwrap(), construct::MINOR_7);
+        assert_eq!(parse_chord_quality("DOM7").unwrap(), construct::DOM_7);
+    }
+
+    #[test]
+    fn test_parse_pitch_edge_cases() {
+        assert!(parse_pitch("").is_err());
+        assert!(parse_pitch("X4").is_err());
+        // Very high/low should error
+        assert!(parse_pitch("C11").is_err()); // MIDI > 127
+    }
+
+    #[test]
+    fn test_parse_chord_spec_no_quality() {
+        // No quality = major triad
+        let (root, intervals) = parse_chord_spec("C").unwrap();
+        assert_eq!(root, 60);
+        assert_eq!(intervals, construct::MAJOR_TRIAD);
+    }
+
+    #[test]
+    fn test_pitch_name_roundtrip() {
+        for midi in 24..=96 {
+            let name = pitch_name(midi);
+            let parsed = parse_pitch(&name).unwrap();
+            assert_eq!(parsed, midi, "roundtrip failed for MIDI {}: name={}", midi, name);
+        }
+    }
 }

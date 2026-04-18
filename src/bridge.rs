@@ -35,6 +35,7 @@ pub fn to_pattern(duration: f64, velocity: i32) -> Result<()> {
             start: *t,
             duration,
             velocity,
+                ..Default::default()
         })
         .filter(|n| (0..=127).contains(&n.pitch))
         .collect();
@@ -165,9 +166,9 @@ mod tests {
 
     fn make_notes() -> Vec<MrNote> {
         vec![
-            MrNote { pitch: 60, start: 0.0, duration: 2.0, velocity: 100 },
-            MrNote { pitch: 72, start: 2.0, duration: 2.0, velocity: 50 },
-            MrNote { pitch: 60, start: 4.0, duration: 2.0, velocity: 80 },
+            MrNote { pitch: 60, start: 0.0, duration: 2.0, velocity: 100, ..Default::default() },
+            MrNote { pitch: 72, start: 2.0, duration: 2.0, velocity: 50, ..Default::default() },
+            MrNote { pitch: 60, start: 4.0, duration: 2.0, velocity: 80, ..Default::default() },
         ]
     }
 
@@ -197,9 +198,9 @@ mod tests {
     #[test]
     fn test_density_curve() {
         let notes = vec![
-            MrNote { pitch: 60, start: 0.0, duration: 4.0, velocity: 100 },
-            MrNote { pitch: 64, start: 1.0, duration: 2.0, velocity: 100 },
-            MrNote { pitch: 67, start: 1.0, duration: 2.0, velocity: 100 },
+            MrNote { pitch: 60, start: 0.0, duration: 4.0, velocity: 100, ..Default::default() },
+            MrNote { pitch: 64, start: 1.0, duration: 2.0, velocity: 100, ..Default::default() },
+            MrNote { pitch: 67, start: 1.0, duration: 2.0, velocity: 100, ..Default::default() },
         ];
         let curve = density_curve(&notes, 4.0, 0.5);
         // At t=0: 1 note active
@@ -220,11 +221,62 @@ mod tests {
                 start: p[0],
                 duration: 0.5,
                 velocity: 100,
+                ..Default::default()
             })
             .collect();
         assert_eq!(notes.len(), 3);
         assert_eq!(notes[0].pitch, 60);
         assert_eq!(notes[1].pitch, 64);
         assert_eq!(notes[2].pitch, 67);
+    }
+
+    #[test]
+    fn test_to_pattern_filters_out_of_range() {
+        // Values outside 0-127 should be filtered when converting curve to pattern
+        let points = vec![[0.0, -5.0], [1.0, 60.0], [2.0, 200.0]];
+        let notes: Vec<MrNote> = points
+            .iter()
+            .map(|p| MrNote {
+                pitch: (p[1] as f64).round() as i32,
+                start: p[0],
+                duration: 0.5,
+                velocity: 100,
+                ..Default::default()
+            })
+            .filter(|n| (0..=127).contains(&n.pitch))
+            .collect();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].pitch, 60);
+    }
+
+    #[test]
+    fn test_pitch_curve_empty() {
+        let notes: Vec<MrNote> = vec![];
+        let curve = pitch_curve(&notes, 4.0, 0.5);
+        assert!(curve.is_empty());
+    }
+
+    #[test]
+    fn test_velocity_curve_empty() {
+        let notes: Vec<MrNote> = vec![];
+        let curve = velocity_curve(&notes, 4.0, 0.5);
+        assert!(curve.is_empty());
+    }
+
+    #[test]
+    fn test_density_curve_empty() {
+        let notes: Vec<MrNote> = vec![];
+        let curve = density_curve(&notes, 4.0, 0.5);
+        assert!(curve.is_empty());
+    }
+
+    #[test]
+    fn test_pitch_curve_single_note() {
+        let notes = vec![MrNote { pitch: 60, start: 0.0, duration: 4.0, velocity: 100, ..Default::default() }];
+        let curve = pitch_curve(&notes, 4.0, 1.0);
+        // Single note means min == max, normalized to 0.0
+        for p in &curve {
+            assert!((p[1] - 0.0).abs() < 0.001, "single note curve should be 0.0, got {}", p[1]);
+        }
     }
 }

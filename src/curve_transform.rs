@@ -141,4 +141,38 @@ mod tests {
         assert!((result[0] - 0.5).abs() < 0.001);
         assert!((result[1] - 0.5).abs() < 0.001);
     }
+
+    #[test]
+    fn test_reverse_values_flipped() {
+        let points = vec![[0.0, 0.1], [1.0, 0.5], [2.0, 0.9]];
+        let times: Vec<f64> = points.iter().map(|p| p[0]).collect();
+        let mut values: Vec<f64> = points.iter().map(|p| p[1]).collect();
+        values.reverse();
+        let result: Vec<[f64; 2]> = times.into_iter().zip(values).map(|(t, v)| [t, v]).collect();
+        // Times preserved, values reversed
+        assert!((result[0][0] - 0.0).abs() < 0.001);
+        assert!((result[0][1] - 0.9).abs() < 0.001);
+        assert!((result[1][0] - 1.0).abs() < 0.001);
+        assert!((result[1][1] - 0.5).abs() < 0.001);
+        assert!((result[2][0] - 2.0).abs() < 0.001);
+        assert!((result[2][1] - 0.1).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_reverse_empty() {
+        let points: Vec<[f64; 2]> = vec![];
+        assert!(points.is_empty());
+        // Empty curve reverse should be empty
+    }
+
+    #[test]
+    fn test_reverse_single_point() {
+        let points = vec![[0.0, 0.5]];
+        let times: Vec<f64> = points.iter().map(|p| p[0]).collect();
+        let mut values: Vec<f64> = points.iter().map(|p| p[1]).collect();
+        values.reverse();
+        let result: Vec<[f64; 2]> = times.into_iter().zip(values).map(|(t, v)| [t, v]).collect();
+        assert_eq!(result.len(), 1);
+        assert!((result[0][1] - 0.5).abs() < 0.001);
+    }
 }

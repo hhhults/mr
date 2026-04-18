@@ -60,10 +60,7 @@ pub fn write(target: &str, length: Option<f64>, name: Option<&str>) -> Result<()
     }
     clip.set_looping(true)?;
 
-    let ableton_notes: Vec<ableton::Note> = notes
-        .iter()
-        .map(|n| ableton::Note::new(n.pitch, n.start as f32, n.duration as f32, n.velocity))
-        .collect();
+    let ableton_notes: Vec<ableton::Note> = notes.iter().map(|n| n.to_ableton()).collect();
 
     for chunk in ableton_notes.chunks(80) {
         clip.add_notes(chunk)?;
@@ -186,4 +183,87 @@ pub fn automate(target: &str, param: &str, device_idx: i32, resolution: f64) -> 
     );
 
     Ok(())
+}
+
+fn resolve_param_idx(session: &ableton::Session, track_idx: i32, device_idx: i32, param_name: &str) -> Result<i32> {
+    let device = session.track(track_idx).device(device_idx);
+    let names = device.parameter_names()?;
+    names
+        .iter()
+        .position(|n| n.eq_ignore_ascii_case(param_name))
+        .or_else(|| {
+            names
+                .iter()
+                .position(|n| n.to_lowercase().contains(&param_name.to_lowercase()))
+        })
+        .map(|i| i as i32)
+        .ok_or_else(|| Error::ParamNotFound(param_name.to_string()))
+}
+
+/// Insert a single automation step on a parameter.
+pub fn envelope_step(
+    target: &str,
+    device_idx: i32,
+    param_name: &str,
+    time: f64,
+    duration: f64,
+    value: f64,
+) -> Result<()> {
+    let (track_name, slot) = parse_target(target)?;
+    let session = connect::connect()?;
+    let idx = connect::resolve_track(&session, track_name)?;
+    let param_idx = resolve_param_idx(&session, idx, device_idx, param_name)?;
+    let clip = session.track(idx).clip(slot);
+    clip.insert_automation_step(device_idx, param_idx, time as f32, duration as f32, value as f32)?;
+    eprintln!(
+        "{}:{} {} @ {:.3}..{:.3} = {:.3}",
+        track_name,
+        slot,
+        param_name,
+        time,
+        time + duration,
+        value
+    );
+    Ok(())
+}
+
+/// Read the current automation value at a time.
+pub fn envelope_value(
+    target: &str,
+    device_idx: i32,
+    param_name: &str,
+    time: f64,
+) -> Result<()> {
+    let (track_name, slot) = parse_target(target)?;
+    let session = connect::connect()?;
+    let idx = connect::resolve_track(&session, track_name)?;
+    let param_idx = resolve_param_idx(&session, idx, device_idx, param_name)?;
+    let clip = session.track(idx).clip(slot);
+    let v = clip.automation_value_at(device_idx, param_idx, time as f32)?;
+    println!("{}", v);
+    Ok(())
+}
+
+/// Sample the envelope at regular intervals and write as a curve to stdout.
+pub fn envelope_read(
+    target: &str,
+    device_idx: i32,
+    param_name: &str,
+    length: f64,
+    resolution: f64,
+) -> Result<()> {
+    let (track_name, slot) = parse_target(target)?;
+    let session = connect::connect()?;
+    let idx = connect::resolve_track(&session, track_name)?;
+    let param_idx = resolve_param_idx(&session, idx, device_idx, param_name)?;
+    let clip = session.track(idx).clip(slot);
+
+    let mut points: Vec<[f64; 2]> = Vec::new();
+    let mut t = 0.0;
+    while t <= length + 1e-6 {
+        let v = clip.automation_value_at(device_idx, param_idx, t as f32)? as f64;
+        points.push([t, v]);
+        t += resolution;
+    }
+    crate::json::write_stdout(&crate::json::MrData::Curve { points })
 }

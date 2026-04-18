@@ -235,4 +235,73 @@ mod tests {
         assert_eq!(parsed.tracks[1].pan, -0.3);
         assert_eq!(parsed.tracks[1].sends, vec![0.4, 0.0]);
     }
+
+    #[test]
+    fn test_snapshot_file_roundtrip() {
+        let dir = std::env::temp_dir().join("mr_test_snapshots");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test_snap.json");
+
+        let snapshot = Snapshot {
+            tempo: 135.0,
+            tracks: vec![TrackState {
+                name: "kick".into(),
+                volume: 0.85,
+                pan: 0.0,
+                mute: false,
+                sends: vec![0.2],
+            }],
+        };
+        let json = serde_json::to_string_pretty(&snapshot).unwrap();
+        fs::write(&path, &json).unwrap();
+
+        let loaded_json = fs::read_to_string(&path).unwrap();
+        let loaded: Snapshot = serde_json::from_str(&loaded_json).unwrap();
+        assert_eq!(loaded.tempo, 135.0);
+        assert_eq!(loaded.tracks[0].name, "kick");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_snapshot_empty_tracks() {
+        let snapshot = Snapshot {
+            tempo: 100.0,
+            tracks: vec![],
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let parsed: Snapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.tracks.len(), 0);
+    }
+
+    #[test]
+    fn test_snapshot_mute_field() {
+        let snapshot = Snapshot {
+            tempo: 120.0,
+            tracks: vec![TrackState {
+                name: "test".into(),
+                volume: 0.5,
+                pan: 0.0,
+                mute: true,
+                sends: vec![],
+            }],
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let parsed: Snapshot = serde_json::from_str(&json).unwrap();
+        assert!(parsed.tracks[0].mute);
+    }
+
+    #[test]
+    fn test_list_names_empty_dir() {
+        // list_names with non-existent dir should return empty
+        let orig = std::env::var("HOME").unwrap_or_default();
+        // Don't actually modify HOME; just test the path logic
+        let dir = snapshots_dir();
+        // If dir doesn't exist, list_names returns empty vec
+        if !dir.exists() {
+            let names = list_names().unwrap();
+            assert!(names.is_empty());
+        }
+    }
 }
